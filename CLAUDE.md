@@ -16,8 +16,9 @@ The human owner is still confirming these. If a task below needs one and it
 isn't filled in yet, ask rather than inventing a value:
 - Which Boomi process is the actual pilot (currently a placeholder id in
   `components/components.json`).
-- The real environment IDs / atom IDs for Dev, QA, PD (placeholders in
-  `environments/*.json`).
+- The atom IDs for Dev, QA, PD (still placeholders in `environments/*.json`
+  — the trial account's environments all show 0 runtimes, so there's no
+  atom to attach yet). Environment IDs themselves are filled in.
 - The admin allow-list (GitHub usernames allowed into the Streamlit app).
 - Whether PD promotion needs a required-reviewer approval in GitHub, beyond
   the app's own gate (currently assumed yes, environment `production` is

@@ -1,6 +1,6 @@
 {
-  "_comment": "QA environment config. Same shape as dev.json, different IDs/values.",
-  "environment_id": "REPLACE-WITH-QA-ENVIRONMENT-ID",
+  "_comment": "QA environment config. Same shape as dev.json, different IDs/values. atom_id is still a placeholder: the trial account's QA environment shows 0 runtimes, so there's no atom to attach yet.",
+  "environment_id": "21b3b2b5-bb52-4c7f-9308-135a2d1e2689",
   "atom_id": "REPLACE-WITH-QA-ATOM-ID",
   "extensions": {
     "example_connection_url": "https://qa.example.internal/api"

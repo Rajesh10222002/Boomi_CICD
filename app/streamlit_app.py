@@ -1,40 +1,135 @@
 """
 Boomi CI/CD admin console.
 
-STATUS: scaffold. GitHub OAuth login and real Actions-API status calls are
-stubbed — see CLAUDE.md items 1 and 3. This runs and renders, but everyone
-is treated as authorized and status/audit data is fake, until those are
-filled in.
+STATUS: scaffold. GitHub OAuth login (CLAUDE.md item 1) and the Actions-API
+status/audit/dispatch calls (CLAUDE.md item 3) are both wired up below.
+Promoting to QA/PD still needs a package_id typed in by hand — cd.yml
+requires one and there's no automated way yet to read it back out of the
+ci.yml run's packages.json artifact.
 
 Secrets this app expects (Streamlit Community Cloud "Secrets" panel, or
 .streamlit/secrets.toml locally — never commit that file):
 
     GITHUB_OAUTH_CLIENT_ID
     GITHUB_OAUTH_CLIENT_SECRET
-    GITHUB_REPO              e.g. "Rajesh10222002/Boomi_CICD"
-    GITHUB_API_TOKEN         fine-grained PAT or GitHub App token, scoped to
-                             this repo's Actions/Checks/Environments only
-    ADMIN_USERNAMES          list of allowed GitHub usernames
+    GITHUB_OAUTH_REDIRECT_URI   this app's own URL, exactly as registered on
+                                the GitHub OAuth App's "Authorization callback
+                                URL" (e.g. the Streamlit Community Cloud URL)
+    GITHUB_REPO                 e.g. "Rajesh10222002/Boomi_CICD"
+    GITHUB_API_TOKEN            fine-grained PAT or GitHub App token, scoped to
+                                this repo's Actions/Checks/Environments only
+    ADMIN_USERNAMES             list of allowed GitHub usernames
 """
 
 import json
+import secrets as secrets_lib
 from pathlib import Path
+from urllib.parse import urlencode
 
+import requests
 import streamlit as st
 
 COMPONENTS_PATH = Path(__file__).parent.parent / "components" / "components.json"
 
+GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
+GITHUB_USER_API_URL = "https://api.github.com/user"
+GITHUB_API_BASE = "https://api.github.com"
+
+_RUN_CONCLUSION_TO_STATUS = {"success": "passed", "failure": "failed", "cancelled": "cancelled"}
+
+
+def _required_secret(name: str) -> str:
+    value = st.secrets.get(name)
+    if not value:
+        st.error(f"Missing Streamlit secret: {name}. See app/.streamlit/secrets.toml.example.")
+        st.stop()
+    return value
+
+
+def _admin_usernames() -> set:
+    return {n.lower() for n in st.secrets.get("ADMIN_USERNAMES", [])}
+
+
+def _login_url(client_id: str, redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "read:user",
+        "state": state,
+    }
+    return f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def _exchange_code_for_token(client_id: str, client_secret: str, redirect_uri: str, code: str) -> str:
+    resp = requests.post(
+        GITHUB_ACCESS_TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+        headers={"Accept": "application/json"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise RuntimeError(f"GitHub token exchange failed: {data}")
+    return data["access_token"]
+
+
+def _fetch_github_username(access_token: str) -> str:
+    resp = requests.get(
+        GITHUB_USER_API_URL,
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()["login"]
+
 
 def _check_authorized() -> bool:
     """
-    TODO (CLAUDE.md item 1): replace with real GitHub OAuth.
-    Should redirect through GitHub's authorize/access_token endpoints,
-    fetch the username via GET https://api.github.com/user, and check it
-    against st.secrets["ADMIN_USERNAMES"]. Until then, everyone is let in
-    so the rest of the UI can be built and demoed.
+    GitHub OAuth login gated to usernames in st.secrets["ADMIN_USERNAMES"].
+    Redirects through GitHub's authorize/access_token endpoints, fetches the
+    authenticated username via GET https://api.github.com/user, and checks it
+    against the allow-list. Login state lives in st.session_state, so it's
+    re-checked on every fresh browser session (no persistent cookie/token).
     """
-    st.warning("Auth not wired up yet — anyone can use this build. See CLAUDE.md item 1.", icon="⚠️")
-    return True
+    if st.session_state.get("gh_authorized"):
+        return True
+
+    client_id = _required_secret("GITHUB_OAUTH_CLIENT_ID")
+    client_secret = _required_secret("GITHUB_OAUTH_CLIENT_SECRET")
+    redirect_uri = _required_secret("GITHUB_OAUTH_REDIRECT_URI")
+
+    code = st.query_params.get("code")
+    state = st.query_params.get("state")
+
+    if code:
+        if not state or state != st.session_state.get("oauth_state"):
+            st.error("OAuth state mismatch — please try logging in again.")
+            st.query_params.clear()
+            st.stop()
+        try:
+            access_token = _exchange_code_for_token(client_id, client_secret, redirect_uri, code)
+            username = _fetch_github_username(access_token)
+        except Exception as exc:  # noqa: BLE001 - surface any auth failure to the user
+            st.error(f"GitHub login failed: {exc}")
+            st.query_params.clear()
+            st.stop()
+
+        st.query_params.clear()
+        st.session_state["gh_username"] = username
+        st.session_state["gh_authorized"] = username.lower() in _admin_usernames()
+        st.rerun()
+
+    state = secrets_lib.token_urlsafe(24)
+    st.session_state["oauth_state"] = state
+    st.link_button("Log in with GitHub", _login_url(client_id, redirect_uri, state))
+    return False
 
 
 def _load_processes():
@@ -42,33 +137,90 @@ def _load_processes():
         return json.load(f)["processes"]
 
 
+def _github_api_headers() -> dict:
+    token = _required_secret("GITHUB_API_TOKEN")
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+
+@st.cache_data(ttl=30)
 def _get_latest_run_status(process_name: str) -> str:
     """
-    TODO (CLAUDE.md item 3): replace with a real call to the GitHub
-    Checks/Actions API for the most recent ci.yml run touching this
-    process. Placeholder always returns "unknown" so the UI doesn't lie
-    about test results.
+    Status of the most recent `ci.yml` run on `main`, mapped to a UI-friendly
+    value ("passed" / "failed" / "running" / "cancelled" / "unknown").
+
+    ci.yml currently builds/tests every process in components.json in one
+    job rather than one process at a time, so this doesn't yet filter by
+    process_name — it reports the same repo-wide CI status for every process
+    until components.json / ci.yml support more than the one pilot process.
     """
-    return "unknown"
+    del process_name  # not yet filterable — see docstring
+    try:
+        resp = requests.get(
+            f"{GITHUB_API_BASE}/repos/{_required_secret('GITHUB_REPO')}/actions/workflows/ci.yml/runs",
+            headers=_github_api_headers(),
+            params={"branch": "main", "per_page": 1},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - degrade to "unknown" rather than crash the page
+        st.caption(f"Could not fetch CI status: {exc}")
+        return "unknown"
+
+    runs = resp.json().get("workflow_runs", [])
+    if not runs:
+        return "unknown"
+    run = runs[0]
+    if run["status"] != "completed":
+        return "running"
+    return _RUN_CONCLUSION_TO_STATUS.get(run["conclusion"], run["conclusion"] or "unknown")
 
 
 def _trigger_workflow(workflow_file: str, inputs: dict):
-    """
-    TODO (CLAUDE.md item 3): POST to
-    https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches
-    with {"ref": "main", "inputs": inputs}, using st.secrets["GITHUB_API_TOKEN"].
-    """
-    st.info(f"(stub) would trigger {workflow_file} with {inputs}")
+    """POST a workflow_dispatch event for workflow_file on main with the given inputs."""
+    try:
+        resp = requests.post(
+            f"{GITHUB_API_BASE}/repos/{_required_secret('GITHUB_REPO')}/actions/workflows/{workflow_file}/dispatches",
+            headers=_github_api_headers(),
+            json={"ref": "main", "inputs": inputs},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - surface the failure instead of crashing the page
+        st.error(f"Failed to trigger {workflow_file}: {exc}")
+        return
+    st.success(f"Triggered {workflow_file} with {inputs}")
+    _get_latest_run_status.clear()
+
+
+@st.cache_data(ttl=30)
+def _get_recent_runs(limit: int = 15):
+    """Most recent Actions runs across the repo (any workflow), newest first."""
+    try:
+        resp = requests.get(
+            f"{GITHUB_API_BASE}/repos/{_required_secret('GITHUB_REPO')}/actions/runs",
+            headers=_github_api_headers(),
+            params={"per_page": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - degrade to an empty table rather than crash the page
+        st.caption(f"Could not fetch run history: {exc}")
+        return []
+    return resp.json().get("workflow_runs", [])
 
 
 def main():
     st.set_page_config(page_title="Boomi CI/CD Admin", layout="wide")
 
     if not _check_authorized():
-        st.error("You are not authorized to use this app.")
+        if st.session_state.get("gh_username"):
+            st.error(f"GitHub user '{st.session_state['gh_username']}' is not on the admin allow-list.")
+        else:
+            st.info("Log in with GitHub to use this app.")
         st.stop()
 
     st.title("Boomi CI/CD Admin Console")
+    st.caption(f"Signed in as {st.session_state['gh_username']}")
 
     processes = _load_processes()
     selected = st.multiselect(
@@ -82,29 +234,49 @@ def main():
         status = _get_latest_run_status(name)
         st.write(f"Latest Dev test status: **{status}**")
 
+        package_id = st.text_input(
+            "Package ID to promote",
+            key=f"package-id-{name}",
+            help="From the ci.yml run's packages.json artifact — not looked up automatically yet.",
+        )
+
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button(f"Build & Deploy to Dev — {name}", key=f"dev-{name}"):
                 _trigger_workflow("ci.yml", {"process_name": name})
         with col2:
-            qa_disabled = status != "passed"
+            qa_disabled = status != "passed" or not package_id
             if st.button(f"Promote to QA — {name}", key=f"qa-{name}", disabled=qa_disabled):
-                _trigger_workflow("cd.yml", {"process_name": name, "target_environment": "qa"})
+                _trigger_workflow(
+                    "cd.yml", {"process_name": name, "package_id": package_id, "target_environment": "qa"}
+                )
         with col3:
             # TODO: this should also require the QA stage's own status,
             # once _get_latest_run_status can distinguish stages.
-            pd_disabled = status != "passed"
+            pd_disabled = status != "passed" or not package_id
             if st.button(f"Promote to PD — {name}", key=f"pd-{name}", disabled=pd_disabled):
-                _trigger_workflow("cd.yml", {"process_name": name, "target_environment": "prod"})
+                _trigger_workflow(
+                    "cd.yml", {"process_name": name, "package_id": package_id, "target_environment": "prod"}
+                )
 
     st.divider()
     st.subheader("Deploy history")
-    st.caption("TODO: pull real past Actions runs instead of showing this placeholder.")
-    st.table(
-        [
-            {"process": "PLACEHOLDER-sample-process", "environment": "dev", "who": "-", "when": "-", "outcome": "-"},
-        ]
-    )
+    runs = _get_recent_runs()
+    if not runs:
+        st.caption("No recent Actions runs found (or GITHUB_API_TOKEN / GITHUB_REPO not configured).")
+    else:
+        st.table(
+            [
+                {
+                    "workflow": run["name"],
+                    "who": run["triggering_actor"]["login"] if run.get("triggering_actor") else "-",
+                    "when": run["created_at"],
+                    "outcome": run["conclusion"] or run["status"],
+                    "run_url": run["html_url"],
+                }
+                for run in runs
+            ]
+        )
 
 
 if __name__ == "__main__":

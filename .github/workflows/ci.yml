@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      process_name:
+        description: "Process name, as it appears in components/components.json (informational only for now — the job still builds/tests every process in components.json)"
+        required: false
 
 jobs:
   package-and-test:
