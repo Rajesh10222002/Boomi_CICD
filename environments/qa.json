@@ -1,0 +1,8 @@
+{
+  "_comment": "QA environment config. Same shape as dev.json, different IDs/values.",
+  "environment_id": "REPLACE-WITH-QA-ENVIRONMENT-ID",
+  "atom_id": "REPLACE-WITH-QA-ATOM-ID",
+  "extensions": {
+    "example_connection_url": "https://qa.example.internal/api"
+  }
+}

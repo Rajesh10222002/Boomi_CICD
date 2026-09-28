@@ -1,0 +1,52 @@
+name: CI - Package, Deploy to Dev, Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  package-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Package component(s)
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+        run: python package_component.py --config ../components/components.json --out ../packages.json
+
+      - name: Deploy package(s) to Dev
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+        run: |
+          python deploy_component.py --process-name PLACEHOLDER-sample-process \
+            --packages ../packages.json --env dev --config ../environments/dev.json
+
+      - name: Run test cases against Dev
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+        run: python run_tests.py --env dev --tests ../tests
+
+      - name: Upload packages.json (so cd.yml / the app know what's deployable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages.json

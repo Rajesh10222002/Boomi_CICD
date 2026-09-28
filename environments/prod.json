@@ -1,0 +1,8 @@
+{
+  "_comment": "PD (production) environment config. Promotions into this environment_id go through the GitHub 'production' Environment's required-reviewer gate, if one is configured.",
+  "environment_id": "REPLACE-WITH-PD-ENVIRONMENT-ID",
+  "atom_id": "REPLACE-WITH-PD-ATOM-ID",
+  "extensions": {
+    "example_connection_url": "https://pd.example.internal/api"
+  }
+}

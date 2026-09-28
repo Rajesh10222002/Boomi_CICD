@@ -1,0 +1,21 @@
+{
+  "_comment": "One file per test case. Copy this as a template once the pilot process is chosen and you know its real trigger and expected output.",
+  "name": "sample-happy-path",
+  "component_id": "REPLACE-WITH-BOOMI-COMPONENT-GUID",
+  "trigger": {
+    "type": "http_post",
+    "_comment": "How the deployed-to-Dev process gets invoked for this test. If it's not an HTTP listener, run_tests.py's trigger logic needs a matching branch.",
+    "listener_url": "REPLACE-WITH-DEV-LISTENER-URL",
+    "payload": {
+      "example_field": "example_value"
+    }
+  },
+  "expected": {
+    "_comment": "What run_tests.py checks the Execution Record against once the run finishes.",
+    "status": "COMPLETE",
+    "min_document_count": 1,
+    "output_contains": {
+      "example_output_field": "expected_value"
+    }
+  }
+}

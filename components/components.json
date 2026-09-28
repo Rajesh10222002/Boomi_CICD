@@ -1,0 +1,10 @@
+{
+  "_comment": "One entry per Boomi process this pipeline manages. component_id is the Boomi component's GUID (find it in the process's URL in Boomi Integration, or via the Component Metadata API). Fill in once the pilot process is chosen.",
+  "processes": [
+    {
+      "name": "PLACEHOLDER-sample-process",
+      "component_id": "REPLACE-WITH-BOOMI-COMPONENT-GUID",
+      "description": "Pilot process — replace this whole entry once the real one is picked."
+    }
+  ]
+}

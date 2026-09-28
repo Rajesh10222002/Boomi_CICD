@@ -1,0 +1,9 @@
+{
+  "_comment": "Dev environment config. environment_id and atom_id come from Boomi Manage > Atom Management (Environment) / Atoms.",
+  "environment_id": "REPLACE-WITH-DEV-ENVIRONMENT-ID",
+  "atom_id": "REPLACE-WITH-DEV-ATOM-ID",
+  "extensions": {
+    "_comment": "Environment-specific override values, e.g. a connection endpoint or folder path that differs from QA/PD.",
+    "example_connection_url": "https://dev.example.internal/api"
+  }
+}
