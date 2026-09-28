@@ -1,8 +1,10 @@
 # Boomi CI/CD Pilot
 
 Automates packaging, testing, and promoting Boomi integration processes through
-**Dev → QA → PD**, driven by GitHub Actions, with a free static GitHub Pages
-admin console for triggering it.
+**Dev → QA → PD**, driven entirely by GitHub Actions — no separate admin app,
+no third-party hosting, no custom login. You trigger runs from the Actions
+tab, and every manual run opens (then closes) a GitHub Issue as its audit
+record.
 
 Full design doc (architecture, decisions, open questions): see the linked plan
 shared with this repo, or `docs/PLAN.md` once exported here.
@@ -15,26 +17,34 @@ environments/  Per-environment config: environment IDs, atom IDs, extension valu
 tests/         Test-case definitions (input + expected outcome) per process
 scripts/       Python helpers that call the Boomi AtomSphere Platform API
 .github/workflows/
-  ci.yml               Package + deploy-to-Dev + run tests, on every push to main
-  cd.yml               Promote a tested package to QA or PD (workflow_dispatch)
-  publish-processes.yml  Snapshots live Boomi processes to docs/processes.json
-  list-processes.yml    One-off Boomi process lookup, printed to a job summary
-  debug-secrets.yml    Prints SHA256 hashes of the Boomi secrets (never values)
-docs/          GitHub Pages admin console (static HTML/JS, no server, no
-               third-party hosting) — process picker + promote buttons
+  ci.yml             Package + deploy-to-Dev + run tests. Push to main, or
+                      workflow_dispatch for one ad-hoc process.
+  cd.yml             Promote a tested package to QA or PD (workflow_dispatch).
+  list-processes.yml  Look up live Boomi processes + their latest package,
+                      printed to a job summary — use this to fill in the
+                      componentId/packageId that ci.yml/cd.yml ask for.
+  debug-secrets.yml  Prints SHA256 hashes of the Boomi secrets (never values).
 ```
 
-## Why no Streamlit / no separate hosting
+## Why no custom admin app
 
-An earlier version of this used Streamlit Community Cloud for the admin UI.
-That means a third party (Snowflake/Streamlit) would hold the Boomi and
-GitHub tokens and every API call would run on their infrastructure — a real
-compliance concern for handling this org's credentials and deployment data.
-`docs/index.html` replaces it: it's a static page hosted for free by GitHub
-Pages, in the same repo, under the same GitHub access control as everything
-else here. Nothing in it ever talks to Boomi directly — a workflow
-(`publish-processes.yml`) does that server-side, using the same repo secrets
-as `ci.yml`/`cd.yml`, and just writes a JSON snapshot the page reads.
+Two earlier approaches were tried and dropped:
+- **Streamlit Community Cloud** — would put the Boomi and GitHub tokens, and
+  every API call, on third-party (Snowflake/Streamlit) infrastructure. A real
+  compliance concern for this org's credentials and deployment data.
+- **A static GitHub Pages page with a pasted personal access token** — free
+  and stays inside GitHub, but the token sits in each admin's browser storage
+  with no central visibility, expiry enforcement, or revocation.
+
+Instead, this repo uses GitHub's own `workflow_dispatch` forms (Actions tab →
+pick a workflow → "Run workflow") as the trigger, and each manual run opens a
+GitHub Issue with the request's details (who, what, when, why) and closes it
+with the outcome when done — matching how Quanta's other Boomi/Incorta CI/CD
+repos (`qco-incorta-cicd`, `qco-incorta-ui`) already do this in production.
+Access control is entirely GitHub's: only repo collaborators can dispatch a
+workflow at all, and the `production` Environment's required reviewers (see
+setup step 4) gate PD promotions specifically. No login page, no token to
+paste anywhere, nothing to revoke beyond normal GitHub repo access.
 
 ## One-time setup (you do this, not Claude Code)
 
@@ -49,37 +59,38 @@ as `ci.yml`/`cd.yml`, and just writes a JSON snapshot the page reads.
      (defaults to `https://api.boomi.com`; use `https://api.platform.gb.boomi.com`
      for EU/GB accounts)
 
-   Once these are set, run the **"Publish Boomi Processes"** workflow once
-   from the Actions tab so `docs/processes.json` has real data (it also runs
-   every 15 minutes on its own after that). Use the **"Debug Boomi Secrets"**
-   workflow to sanity-check what got saved without ever printing the values.
-3. **Enable GitHub Pages** — Settings → Pages → Source: "Deploy from a
-   branch" → branch `main`, folder `/docs`. The admin console will then be at
-   `https://<your-username>.github.io/Boomi_CICD/`.
-4. **GitHub Environments** — Settings → Environments → create `qa` and
+   Use the **"Debug Boomi Secrets"** workflow afterward to sanity-check what
+   got saved, without it ever printing the actual values.
+3. **GitHub Environments** — Settings → Environments → create `qa` and
    `production`. On `production`, add required reviewers as the human
    approval gate on PD promotions.
-5. **Who can use the admin console** — access is controlled entirely by
-   GitHub, not by anything in this repo: only people you add as repo
-   collaborators (or org members with access) can generate a personal access
-   token that will actually work against this repo, and the `production`
-   Environment's required reviewers (step 4) further restrict who can
-   approve a PD promotion. Each admin generates their **own** fine-grained
-   PAT (Settings → Developer settings → Personal access tokens → Fine-grained
-   tokens), scoped to just this repo with "Actions: Read and write", and
-   pastes it into the admin console once — it's kept only in that browser's
-   local storage, never committed, never sent anywhere but `api.github.com`.
+4. **Who can trigger runs** — controlled entirely by GitHub repo access, not
+   by anything in this repo: add exactly the people who should be able to
+   dispatch `ci.yml`/`cd.yml` as collaborators (Settings → Collaborators and
+   teams), and rely on step 3's required reviewers for the smaller set who
+   can approve a PD promotion specifically.
+
+## Using it
+
+1. Run **"List Boomi Processes"** (Actions tab → Run workflow) to see live
+   process names, componentIds, and each one's latest packageId in the job
+   summary.
+2. Run **`ci.yml`** (workflow_dispatch) with a `process_name` + `component_id`
+   from that list to build/deploy/test one process against Dev. This opens a
+   tracking Issue, closes it with the outcome when the run finishes.
+3. Run **`cd.yml`** with the `process_name`, the `package_id` from step 1 (or
+   from `ci.yml`'s own packages.json artifact), and `target_environment`
+   (`qa` or `prod`) to promote it. Same tracking-Issue pattern; promoting to
+   `prod` additionally waits on the `production` Environment's reviewers.
 
 ## What's scaffolded vs. what's still TODO
 
-The admin console and the `component_id`/`package_id` it passes through are
-live — no placeholder IDs there. Still to do:
 - Fill in the real atom IDs in `environments/*.json` once an atom/runtime is
   attached to each Boomi environment (environment IDs are already filled in).
 - `components/components.json` still has a placeholder `component_id` — it
   only matters for the push-triggered `ci.yml` pipeline (packages/tests
-  whatever's listed there on every push to `main`); the admin-console flow
-  doesn't touch this file at all.
+  whatever's listed there on every push to `main`); a manual `workflow_dispatch`
+  run with an explicit `component_id` bypasses this file entirely.
 - Write the real expected-output assertions in `tests/*.json` once the pilot
   process is chosen.
 

@@ -8,16 +8,51 @@ on:
   workflow_dispatch:
     inputs:
       process_name:
-        description: "Process name (as shown in the Streamlit app / Boomi)"
+        description: "Process name (find it via the 'List Boomi Processes' workflow)"
         required: false
       component_id:
-        description: "Boomi componentId to package+deploy+test — set by the Streamlit app, which resolves it live from Boomi. Leave blank to run the push-triggered components.json pipeline instead."
+        description: "Boomi componentId to package+deploy+test (from 'List Boomi Processes'). Leave blank to run the push-triggered components.json pipeline instead."
         required: false
+      comment:
+        description: "Optional note about this run (shown in the tracking issue)"
+        required: false
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   package-and-test:
     runs-on: ubuntu-latest
     steps:
+      # Manual (workflow_dispatch) runs get a tracking issue as an audit
+      # record of who requested what and why — push/pull_request runs don't,
+      # to avoid opening an issue on every routine commit.
+      - name: Create tracking issue
+        id: create_issue
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name || 'components.json processes' }}"
+          issue_body=$(cat <<EOF
+          {
+          "process_name": "${{ github.event.inputs.process_name }}",
+          "component_id": "${{ github.event.inputs.component_id }}",
+          "requested_by": "${{ github.actor }}",
+          "comment": "${{ github.event.inputs.comment }}",
+          "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          )
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["build-dev"]}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues")
+          issue_number=$(echo "$response" | jq -r '.number')
+          echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -70,8 +105,25 @@ jobs:
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python run_tests.py --env dev --tests ../tests
 
-      - name: Upload packages.json (so cd.yml / the app know what's deployable)
+      - name: Upload packages.json (so cd.yml knows what's deployable)
         uses: actions/upload-artifact@v4
         with:
           name: packages
           path: packages.json
+
+      - name: Close tracking issue
+        if: always() && github.event_name == 'workflow_dispatch' && steps.create_issue.outputs.issue-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          outcome="${{ job.status }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}/comments"
+          curl -s -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state": "closed"}' \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}"

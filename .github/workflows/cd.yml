@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       process_name:
-        description: "Process name, as it appears in components/components.json"
+        description: "Process name (find it via the 'List Boomi Processes' workflow)"
         required: true
       package_id:
-        description: "Boomi packaged component id to deploy (from CI, or from the app)"
+        description: "Boomi packaged component id to deploy (also from 'List Boomi Processes' — it shows each process's latest package)"
         required: true
       target_environment:
         description: "Environment to promote into"
@@ -16,6 +16,13 @@ on:
         options:
           - qa
           - prod
+      comment:
+        description: "Optional note about this promotion (shown in the tracking issue)"
+        required: false
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   deploy:
@@ -24,6 +31,31 @@ jobs:
     # that Environment's required reviewers (if configured) gate this job.
     environment: ${{ github.event.inputs.target_environment == 'prod' && 'production' || github.event.inputs.target_environment }}
     steps:
+      - name: Create tracking issue
+        id: create_issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          issue_title="Promote ${{ github.event.inputs.process_name }} to ${{ github.event.inputs.target_environment }}"
+          issue_body=$(cat <<EOF
+          {
+          "process_name": "${{ github.event.inputs.process_name }}",
+          "package_id": "${{ github.event.inputs.package_id }}",
+          "target_environment": "${{ github.event.inputs.target_environment }}",
+          "requested_by": "${{ github.actor }}",
+          "comment": "${{ github.event.inputs.comment }}",
+          "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          )
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "${{ github.event.inputs.target_environment }}" '{title: $title, body: $body, labels: ["promote", $env]}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues")
+          issue_number=$(echo "$response" | jq -r '.number')
+          echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -45,3 +77,20 @@ jobs:
             --package-id "${{ github.event.inputs.package_id }}" \
             --env "${{ github.event.inputs.target_environment }}" \
             --config "../environments/${{ github.event.inputs.target_environment == 'prod' && 'prod' || github.event.inputs.target_environment }}.json"
+
+      - name: Close tracking issue
+        if: always() && steps.create_issue.outputs.issue-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          outcome="${{ job.status }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}/comments"
+          curl -s -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state": "closed"}' \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}"
