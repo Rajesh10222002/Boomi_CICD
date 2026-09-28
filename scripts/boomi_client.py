@@ -147,14 +147,26 @@ class BoomiClient:
 
     def query_components(self, component_type="process", limit=200):
         """
-        List live components of a given type (default "process") in the
-        account, so a real component_id can be picked instead of a
-        placeholder. Pages through queryMore until `limit` is reached or
-        results run out.
+        List live, current-version components of a given type (default
+        "process") in the account, so a real component_id can be picked
+        instead of a placeholder. Pages through queryMore until `limit` is
+        reached or results run out.
+
+        Filters deleted=false and currentVersion=true server-side (not just
+        client-side on `deleted`) — otherwise a component with version
+        history shows up once per past version, which both pollutes listings
+        and makes find_component_by_name() see false "ambiguous" matches.
         """
         query = {
             "QueryFilter": {
-                "expression": {"operator": "EQUALS", "property": "type", "argument": [component_type]}
+                "expression": {
+                    "operator": "and",
+                    "nestedExpression": [
+                        {"argument": [component_type], "operator": "EQUALS", "property": "type"},
+                        {"argument": ["false"], "operator": "EQUALS", "property": "deleted"},
+                        {"argument": ["true"], "operator": "EQUALS", "property": "currentVersion"},
+                    ],
+                }
             }
         }
         resp = self._request("POST", self._url("ComponentMetadata", "query"), json=query)
@@ -183,10 +195,15 @@ class BoomiClient:
 
     def find_component_by_name(self, name, component_type="process"):
         """
-        Resolve a live component's componentId by exact name + type, so
-        workflows can take a process name instead of requiring a
-        hand-copied componentId. Raises if there's no match, or more than
-        one (component names aren't guaranteed unique in Boomi).
+        Resolve a live, current-version component's componentId by exact
+        name + type, so workflows can take a process name instead of
+        requiring a hand-copied componentId. Raises if there's no match, or
+        more than one (component names aren't guaranteed unique in Boomi).
+
+        Filters deleted=false and currentVersion=true server-side —
+        otherwise a component with version history matches once per past
+        version, and this raises a false "ambiguous" error for a component
+        that's actually a single, unique process.
         """
         query = {
             "QueryFilter": {
@@ -195,6 +212,8 @@ class BoomiClient:
                     "nestedExpression": [
                         {"argument": [component_type], "operator": "EQUALS", "property": "type"},
                         {"argument": [name], "operator": "EQUALS", "property": "name"},
+                        {"argument": ["false"], "operator": "EQUALS", "property": "deleted"},
+                        {"argument": ["true"], "operator": "EQUALS", "property": "currentVersion"},
                     ],
                 }
             }
