@@ -41,7 +41,7 @@ class BoomiClient:
         self.account_id = _require_env("BOOMI_ACCOUNT_ID")
         self.username = _require_env("BOOMI_USERNAME")
         self.token = _require_env("BOOMI_API_TOKEN")
-        self.base_url = os.environ.get("BOOMI_BASE_URL", "https://api.boomi.com")
+        self.base_url = os.environ.get("BOOMI_BASE_URL") or "https://api.boomi.com"
         self.session = requests.Session()
         self.session.auth = (self.username, self.token)
         self.session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
@@ -135,6 +135,34 @@ class BoomiClient:
         }
         resp = self._request("POST", self._url("ExecutionRecord", "query"), json=query)
         results = resp.json().get("result", [])
+        return results[:limit]
+
+    def query_components(self, component_type="process", limit=200):
+        """
+        List live components of a given type (default "process") in the
+        account, so a real component_id can be picked instead of a
+        placeholder. Pages through queryMore until `limit` is reached or
+        results run out.
+        """
+        query = {
+            "QueryFilter": {
+                "expression": {"operator": "EQUALS", "property": "type", "argument": [component_type]}
+            }
+        }
+        resp = self._request("POST", self._url("ComponentMetadata", "query"), json=query)
+        data = resp.json()
+        results = list(data.get("result", []))
+        query_token = data.get("queryToken")
+        while query_token and len(results) < limit:
+            resp = self._request(
+                "POST",
+                self._url("ComponentMetadata", "queryMore"),
+                data=query_token,
+                headers={"Content-Type": "text/plain"},
+            )
+            data = resp.json()
+            results.extend(data.get("result", []))
+            query_token = data.get("queryToken")
         return results[:limit]
 
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):

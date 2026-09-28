@@ -28,14 +28,24 @@ app/           Streamlit admin console (process list, single-click promote)
    - `BOOMI_ACCOUNT_ID`
    - `BOOMI_USERNAME` — format `BOOMI_TOKEN.<your-boomi-login-email>`
    - `BOOMI_API_TOKEN` — the token value from step 1
+   - `BOOMI_BASE_URL` — only if the trial account is NOT on the US platform
+     (defaults to `https://api.boomi.com`; use `https://api.platform.gb.boomi.com`
+     for EU/GB accounts)
+
+   Once these are set, run the **"List Boomi Processes"** workflow from the
+   Actions tab (workflow_dispatch) to see the account's real processes and
+   their componentIds in the job summary — that's how to find the real value
+   for `components/components.json` without ever putting the token in a
+   terminal or chat.
 3. **GitHub Environments** — Settings → Environments → create `qa` and
    `production`. On `production`, add required reviewers if you want a human
    approval gate on top of the app's single click (see the plan doc).
 4. **GitHub OAuth App** (for the Streamlit login) — GitHub → Settings →
    Developer settings → OAuth Apps → New OAuth App. Callback URL is whatever
-   Streamlit Community Cloud gives your deployed app. Put the Client ID/Secret
-   into Streamlit's app secrets (`.streamlit/secrets.toml` locally, or the
-   Community Cloud "Secrets" panel in production) — **never commit them**.
+   Streamlit Community Cloud gives your deployed app. Put all of the keys
+   listed in `app/.streamlit/secrets.toml.example` into Streamlit's app
+   secrets (`.streamlit/secrets.toml` locally, or the Community Cloud
+   "Secrets" panel in production) — **never commit them**.
 
 ## What's scaffolded vs. what's still TODO
 

@@ -30,6 +30,7 @@ jobs:
           BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python package_component.py --config ../components/components.json --out ../packages.json
 
       - name: Deploy package(s) to Dev
@@ -38,6 +39,7 @@ jobs:
           BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
           python deploy_component.py --process-name PLACEHOLDER-sample-process \
             --packages ../packages.json --env dev --config ../environments/dev.json
@@ -48,6 +50,7 @@ jobs:
           BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python run_tests.py --env dev --tests ../tests
 
       - name: Upload packages.json (so cd.yml / the app know what's deployable)

@@ -1,0 +1,36 @@
+name: List Boomi Processes
+
+# One-off lookup, not part of the CI/CD pipeline: run this manually from the
+# Actions tab to see the account's real components and pick the pilot
+# process's componentId, without ever putting the Boomi token in a terminal
+# or chat.
+
+on:
+  workflow_dispatch:
+    inputs:
+      component_type:
+        description: "Boomi component type to list"
+        required: false
+        default: "process"
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: List components
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: python list_processes.py --type "${{ github.event.inputs.component_type }}"
