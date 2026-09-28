@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Boomi CI/CD Admin</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  .muted { color: #666; font-size: 0.85rem; }
+  section { margin-bottom: 1.75rem; }
+  input[type="text"], input[type="password"] { width: 100%; box-sizing: border-box; padding: 0.5rem; font-size: 1rem; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .pat-box { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  .pat-box input { flex: 1; }
+  button { padding: 0.4rem 0.8rem; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  .process { border: 1px solid #ccc; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.75rem 0; }
+  .process h3 { margin: 0 0 0.25rem 0; }
+  .actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #ddd; }
+  .status-passed { color: #1a7f37; }
+  .status-failed { color: #cf222e; }
+  .status-running { color: #9a6700; }
+  .status-unknown { color: #666; }
+  #toast { position: fixed; bottom: 1rem; right: 1rem; max-width: 320px; }
+  #toast div { background: #222; color: #fff; padding: 0.6rem 0.9rem; border-radius: 6px; margin-top: 0.4rem; }
+</style>
+</head>
+<body>
+
+<h1>Boomi CI/CD Admin</h1>
+<p class="muted">Process list and packages come live from Boomi (published by a GitHub Action). Nothing here calls Boomi directly from the browser.</p>
+
+<section>
+  <details id="pat-details">
+    <summary>GitHub access token (required to use the buttons below)</summary>
+    <p class="muted">
+      Paste a fine-grained personal access token scoped to just this repo, with
+      "Actions: Read and write" permission. It's kept only in this browser's
+      local storage and sent straight to api.github.com — never to any other
+      server.
+    </p>
+    <div class="pat-box">
+      <input type="password" id="pat-input" placeholder="github_pat_..." />
+      <button id="pat-save">Save</button>
+      <button id="pat-clear">Clear</button>
+    </div>
+    <p class="muted" id="pat-status"></p>
+  </details>
+</section>
+
+<section>
+  <input type="text" id="search" placeholder="Search processes by name…" />
+  <p class="muted">
+    Last published: <span id="generated-at">loading…</span>
+    &middot; <button id="refresh-btn">Refresh now</button>
+  </p>
+  <div id="process-list"><p class="muted">Loading processes…</p></div>
+</section>
+
+<section>
+  <h2>Deploy history</h2>
+  <div id="history"><p class="muted">Loading…</p></div>
+</section>
+
+<div id="toast"></div>
+
+<script>
+const OWNER = "Rajesh10222002";
+const REPO = "Boomi_CICD";
+const GH_API = "https://api.github.com";
+const RUN_CONCLUSION_TO_STATUS = { success: "passed", failure: "failed", cancelled: "cancelled" };
+
+let allProcesses = [];
+let lastGeneratedAt = null;
+
+function getPat() {
+  return localStorage.getItem("gh_pat") || "";
+}
+
+function ghHeaders() {
+  return {
+    "Authorization": "Bearer " + getPat(),
+    "Accept": "application/vnd.github+json",
+  };
+}
+
+function toast(msg, isError) {
+  const el = document.createElement("div");
+  el.textContent = msg;
+  if (isError) el.style.background = "#cf222e";
+  document.getElementById("toast").appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+function setupPatBox() {
+  const input = document.getElementById("pat-input");
+  const status = document.getElementById("pat-status");
+  const details = document.getElementById("pat-details");
+  function refreshStatus() {
+    if (getPat()) {
+      status.textContent = "Token saved in this browser.";
+      details.open = false;
+    } else {
+      status.textContent = "No token saved yet — buttons below won't work until you add one.";
+      details.open = true;
+    }
+  }
+  document.getElementById("pat-save").onclick = () => {
+    const v = input.value.trim();
+    if (!v) return;
+    localStorage.setItem("gh_pat", v);
+    input.value = "";
+    refreshStatus();
+    toast("Token saved.");
+  };
+  document.getElementById("pat-clear").onclick = () => {
+    localStorage.removeItem("gh_pat");
+    refreshStatus();
+    toast("Token cleared.");
+  };
+  refreshStatus();
+}
+
+async function dispatchWorkflow(workflowFile, inputs) {
+  if (!getPat()) {
+    toast("Add a GitHub token first (see the box above).", true);
+    return false;
+  }
+  try {
+    const resp = await fetch(`${GH_API}/repos/${OWNER}/${REPO}/actions/workflows/${workflowFile}/dispatches`, {
+      method: "POST",
+      headers: { ...ghHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ref: "main", inputs }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    toast(`Triggered ${workflowFile}.`);
+    return true;
+  } catch (e) {
+    toast(`Failed to trigger ${workflowFile}: ${e.message}`, true);
+    return false;
+  }
+}
+
+async function fetchLatestCiStatus() {
+  try {
+    const resp = await fetch(`${GH_API}/repos/${OWNER}/${REPO}/actions/workflows/ci.yml/runs?branch=main&per_page=1`, { headers: ghHeaders() });
+    if (!resp.ok) return "unknown";
+    const data = await resp.json();
+    const run = (data.workflow_runs || [])[0];
+    if (!run) return "unknown";
+    if (run.status !== "completed") return "running";
+    return RUN_CONCLUSION_TO_STATUS[run.conclusion] || run.conclusion || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function loadHistory() {
+  const el = document.getElementById("history");
+  if (!getPat()) {
+    el.innerHTML = '<p class="muted">Add a GitHub token above to see run history.</p>';
+    return;
+  }
+  try {
+    const resp = await fetch(`${GH_API}/repos/${OWNER}/${REPO}/actions/runs?per_page=15`, { headers: ghHeaders() });
+    if (!resp.ok) throw new Error(resp.status);
+    const data = await resp.json();
+    const runs = data.workflow_runs || [];
+    if (!runs.length) {
+      el.innerHTML = '<p class="muted">No recent runs found.</p>';
+      return;
+    }
+    const rows = runs.map(r => `
+      <tr>
+        <td>${r.name}</td>
+        <td>${r.triggering_actor ? r.triggering_actor.login : "-"}</td>
+        <td>${new Date(r.created_at).toLocaleString()}</td>
+        <td>${r.conclusion || r.status}</td>
+        <td><a href="${r.html_url}" target="_blank" rel="noopener">view</a></td>
+      </tr>`).join("");
+    el.innerHTML = `<table>
+      <tr><th>Workflow</th><th>Who</th><th>When</th><th>Outcome</th><th></th></tr>
+      ${rows}
+    </table>`;
+  } catch (e) {
+    el.innerHTML = `<p class="muted">Could not load run history: ${e.message}</p>`;
+  }
+}
+
+function renderProcessList(filterText) {
+  const el = document.getElementById("process-list");
+  const filtered = allProcesses.filter(p => p.name.toLowerCase().includes(filterText.toLowerCase()));
+  if (!filtered.length) {
+    el.innerHTML = '<p class="muted">No matching processes.</p>';
+    return;
+  }
+  el.innerHTML = "";
+  filtered.forEach(p => {
+    const div = document.createElement("div");
+    div.className = "process";
+    div.innerHTML = `
+      <h3>${p.name}</h3>
+      <p class="muted">Latest CI status: <span class="ci-status">checking…</span>
+        &middot; Latest package: ${p.latestPackageId ? `<code>${p.latestPackageId}</code>` : "none yet"}</p>
+      <div class="actions">
+        <button data-action="dev">Build &amp; Deploy to Dev</button>
+        <button data-action="qa" ${p.latestPackageId ? "" : "disabled"}>Promote to QA</button>
+        <button data-action="prod" ${p.latestPackageId ? "" : "disabled"}>Promote to PD</button>
+      </div>`;
+    const statusEl = div.querySelector(".ci-status");
+    fetchLatestCiStatus().then(s => {
+      statusEl.textContent = s;
+      statusEl.className = "ci-status status-" + s;
+    });
+    div.querySelector('[data-action="dev"]').onclick = () =>
+      dispatchWorkflow("ci.yml", { process_name: p.name, component_id: p.componentId });
+    div.querySelector('[data-action="qa"]').onclick = () =>
+      dispatchWorkflow("cd.yml", { process_name: p.name, package_id: p.latestPackageId, target_environment: "qa" });
+    div.querySelector('[data-action="prod"]').onclick = () =>
+      dispatchWorkflow("cd.yml", { process_name: p.name, package_id: p.latestPackageId, target_environment: "prod" });
+    el.appendChild(div);
+  });
+}
+
+async function loadProcesses() {
+  const resp = await fetch("processes.json?_=" + Date.now());
+  if (!resp.ok) throw new Error(`Could not load processes.json (${resp.status})`);
+  return resp.json();
+}
+
+async function refreshProcessList() {
+  try {
+    const snapshot = await loadProcesses();
+    allProcesses = snapshot.processes || [];
+    lastGeneratedAt = snapshot.generatedAt;
+    document.getElementById("generated-at").textContent =
+      snapshot.generatedAt ? new Date(snapshot.generatedAt).toLocaleString() : "never (run the publish workflow)";
+    renderProcessList(document.getElementById("search").value);
+  } catch (e) {
+    document.getElementById("process-list").innerHTML = `<p class="muted">${e.message}</p>`;
+  }
+}
+
+async function refreshNow() {
+  const btn = document.getElementById("refresh-btn");
+  btn.disabled = true;
+  const dispatched = await dispatchWorkflow("publish-processes.yml", {});
+  if (!dispatched) { btn.disabled = false; return; }
+
+  const startedAt = lastGeneratedAt;
+  toast("Refreshing… this can take about a minute.");
+  const deadline = Date.now() + 90000;
+  const poll = async () => {
+    try {
+      const snapshot = await loadProcesses();
+      if (snapshot.generatedAt && snapshot.generatedAt !== startedAt) {
+        allProcesses = snapshot.processes || [];
+        lastGeneratedAt = snapshot.generatedAt;
+        document.getElementById("generated-at").textContent = new Date(snapshot.generatedAt).toLocaleString();
+        renderProcessList(document.getElementById("search").value);
+        toast("Process list refreshed.");
+        btn.disabled = false;
+        return;
+      }
+    } catch { /* keep polling */ }
+    if (Date.now() < deadline) setTimeout(poll, 5000);
+    else { toast("Still refreshing — reload the page in a bit.", true); btn.disabled = false; }
+  };
+  setTimeout(poll, 5000);
+}
+
+document.getElementById("search").addEventListener("input", e => renderProcessList(e.target.value));
+document.getElementById("refresh-btn").addEventListener("click", refreshNow);
+
+setupPatBox();
+refreshProcessList();
+loadHistory();
+</script>
+</body>
+</html>

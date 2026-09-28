@@ -1,5 +1,2 @@
 requests>=2.31
 urllib3>=1.26
-streamlit>=1.38
-PyJWT>=2.9
-python-dotenv>=1.0
