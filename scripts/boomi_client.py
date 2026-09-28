@@ -181,12 +181,38 @@ class BoomiClient:
             if not c.get("deleted")
         ]
 
-    def find_latest_package(self, component_id):
+    def find_component_by_name(self, name, component_type="process"):
         """
-        Most recently created PackagedComponent for this componentId, or
-        None if it's never been packaged. Lets callers (the Streamlit app)
-        resolve "the package to promote" without anyone typing a packageId.
+        Resolve a live component's componentId by exact name + type, so
+        workflows can take a process name instead of requiring a
+        hand-copied componentId. Raises if there's no match, or more than
+        one (component names aren't guaranteed unique in Boomi).
         """
+        query = {
+            "QueryFilter": {
+                "expression": {
+                    "operator": "and",
+                    "nestedExpression": [
+                        {"argument": [component_type], "operator": "EQUALS", "property": "type"},
+                        {"argument": [name], "operator": "EQUALS", "property": "name"},
+                    ],
+                }
+            }
+        }
+        resp = self._request("POST", self._url("ComponentMetadata", "query"), json=query)
+        results = [r for r in resp.json().get("result", []) if not r.get("deleted")]
+        if not results:
+            raise LookupError(f"No live '{component_type}' component named '{name}' found in this account.")
+        if len(results) > 1:
+            ids = ", ".join(r["componentId"] for r in results)
+            raise LookupError(
+                f"Multiple '{component_type}' components named '{name}' found ({ids}) "
+                "— pass an explicit component_id instead."
+            )
+        return results[0]["componentId"]
+
+    def list_packages(self, component_id, limit=20):
+        """All PackagedComponent entries for a componentId, newest first (for picking a rollback target)."""
         query = {
             "QueryFilter": {
                 "expression": {"operator": "EQUALS", "property": "componentId", "argument": [component_id]}
@@ -194,9 +220,17 @@ class BoomiClient:
         }
         resp = self._request("POST", self._url("PackagedComponent", "query"), json=query)
         results = resp.json().get("result", [])
-        if not results:
-            return None
-        return max(results, key=lambda r: r.get("createdDate", ""))["packageId"]
+        results.sort(key=lambda r: r.get("createdDate", ""), reverse=True)
+        return results[:limit]
+
+    def find_latest_package(self, component_id):
+        """
+        Most recently created PackagedComponent for this componentId, or
+        None if it's never been packaged. Lets callers resolve "the package
+        to promote" without anyone typing a packageId.
+        """
+        packages = self.list_packages(component_id, limit=1)
+        return packages[0]["packageId"] if packages else None
 
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):
         """Poll an execution until it leaves an in-progress state or timeout_s elapses."""

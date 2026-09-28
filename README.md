@@ -21,8 +21,10 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       workflow_dispatch for one ad-hoc process.
   cd.yml             Promote a tested package to QA or PD (workflow_dispatch).
   list-processes.yml  Look up live Boomi processes + their latest package,
-                      printed to a job summary — use this to fill in the
-                      componentId/packageId that ci.yml/cd.yml ask for.
+                      printed to a job summary. Purely informational —
+                      ci.yml/cd.yml resolve process names themselves now.
+  list-packages.yml  Every package (not just latest) for one process, for
+                      picking an older packageId as a rollback target.
   debug-secrets.yml  Prints SHA256 hashes of the Boomi secrets (never values).
 ```
 
@@ -72,16 +74,26 @@ paste anywhere, nothing to revoke beyond normal GitHub repo access.
 
 ## Using it
 
-1. Run **"List Boomi Processes"** (Actions tab → Run workflow) to see live
-   process names, componentIds, and each one's latest packageId in the job
-   summary.
-2. Run **`ci.yml`** (workflow_dispatch) with a `process_name` + `component_id`
-   from that list to build/deploy/test one process against Dev. This opens a
+Only a process name is needed for either workflow — `componentId`/`packageId`
+resolve automatically server-side (via `BoomiClient.find_component_by_name()`
+/ `find_latest_package()`), the same way "List Boomi Processes" looks them up.
+
+1. **Build & deploy to Dev**: Actions tab → **`ci.yml`** → Run workflow →
+   just fill in `process_name` (leave `component_id` blank). Opens a
    tracking Issue, closes it with the outcome when the run finishes.
-3. Run **`cd.yml`** with the `process_name`, the `package_id` from step 1 (or
-   from `ci.yml`'s own packages.json artifact), and `target_environment`
-   (`qa` or `prod`) to promote it. Same tracking-Issue pattern; promoting to
-   `prod` additionally waits on the `production` Environment's reviewers.
+2. **Promote to QA/PD**: Actions tab → **`cd.yml`** → Run workflow →
+   `process_name`, `target_environment` (`qa` or `prod`) — leave `package_id`
+   blank to promote whatever was most recently built. Same tracking-Issue
+   pattern; promoting to `prod` additionally waits on the `production`
+   Environment's reviewers.
+3. **Rollback**: there's no separate rollback button — run `cd.yml` again
+   with an **explicit, older** `package_id` instead of leaving it blank. Use
+   **"List Boomi Packages"** (Actions tab → Run workflow, with `process_name`)
+   to see every past package for a process and pick one.
+4. **"List Boomi Processes"** and **component_id**/**package_id** inputs
+   still exist as an explicit override / manual lookup if you ever need
+   them (e.g. a component name isn't unique, or you want to double-check
+   what resolved), but day-to-day you shouldn't need either.
 
 ## What's scaffolded vs. what's still TODO
 

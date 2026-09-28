@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       process_name:
-        description: "Process name (find it via the 'List Boomi Processes' workflow)"
+        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: false
       component_id:
-        description: "Boomi componentId to package+deploy+test (from 'List Boomi Processes'). Leave blank to run the push-triggered components.json pipeline instead."
+        description: "Boomi componentId — optional, resolved automatically from process_name if left blank. Leave both blank to run the push-triggered components.json pipeline instead."
         required: false
       comment:
         description: "Optional note about this run (shown in the tracking issue)"
@@ -25,9 +25,39 @@ jobs:
   package-and-test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine process list to package
+        id: procs
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.process_name }}" ]; then
+            python write_ad_hoc_config.py \
+              --name "${{ github.event.inputs.process_name }}" \
+              --component-id "${{ github.event.inputs.component_id }}" \
+              --out ../ad_hoc_components.json >> "$GITHUB_OUTPUT"
+            echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "config=../components/components.json" >> "$GITHUB_OUTPUT"
+          fi
+
       # Manual (workflow_dispatch) runs get a tracking issue as an audit
       # record of who requested what and why — push/pull_request runs don't,
-      # to avoid opening an issue on every routine commit.
+      # to avoid opening an issue on every routine commit. Runs after the
+      # step above so the issue shows the resolved componentId even when
+      # only a process_name was given.
       - name: Create tracking issue
         id: create_issue
         if: github.event_name == 'workflow_dispatch'
@@ -38,7 +68,7 @@ jobs:
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ github.event.inputs.process_name }}",
-          "component_id": "${{ github.event.inputs.component_id }}",
+          "component_id": "${{ steps.procs.outputs.resolved-component-id || github.event.inputs.component_id }}",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ github.event.inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -52,29 +82,6 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Determine process list to package
-        id: procs
-        working-directory: scripts
-        run: |
-          if [ -n "${{ github.event.inputs.component_id }}" ]; then
-            python write_ad_hoc_config.py \
-              --name "${{ github.event.inputs.process_name }}" \
-              --component-id "${{ github.event.inputs.component_id }}" \
-              --out ../ad_hoc_components.json
-            echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
-          else
-            echo "config=../components/components.json" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Package component(s)
         working-directory: scripts

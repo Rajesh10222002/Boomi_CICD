@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       process_name:
-        description: "Process name (find it via the 'List Boomi Processes' workflow)"
+        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
       package_id:
-        description: "Boomi packaged component id to deploy (also from 'List Boomi Processes' — it shows each process's latest package)"
-        required: true
+        description: "Boomi packaged component id to deploy — optional, resolves to process_name's latest package if left blank. For a rollback, use 'List Boomi Packages' to find an older one."
+        required: false
       target_environment:
         description: "Environment to promote into"
         required: true
@@ -31,6 +31,32 @@ jobs:
     # that Environment's required reviewers (if configured) gate this job.
     environment: ${{ github.event.inputs.target_environment == 'prod' && 'production' || github.event.inputs.target_environment }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve package_id if needed
+        id: resolve
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.package_id }}" ]; then
+            echo "package-id=${{ github.event.inputs.package_id }}" >> "$GITHUB_OUTPUT"
+          else
+            python resolve_latest_package.py --name "${{ github.event.inputs.process_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Runs after the step above so the issue shows the resolved
+      # package_id even when it wasn't given explicitly.
       - name: Create tracking issue
         id: create_issue
         env:
@@ -40,7 +66,7 @@ jobs:
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ github.event.inputs.process_name }}",
-          "package_id": "${{ github.event.inputs.package_id }}",
+          "package_id": "${{ steps.resolve.outputs.package-id }}",
           "target_environment": "${{ github.event.inputs.target_environment }}",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ github.event.inputs.comment }}",
@@ -56,15 +82,6 @@ jobs:
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
       - name: Deploy package to target environment
         working-directory: scripts
         env:
@@ -74,7 +91,7 @@ jobs:
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
           python deploy_component.py \
-            --package-id "${{ github.event.inputs.package_id }}" \
+            --package-id "${{ steps.resolve.outputs.package-id }}" \
             --env "${{ github.event.inputs.target_environment }}" \
             --config "../environments/${{ github.event.inputs.target_environment == 'prod' && 'prod' || github.event.inputs.target_environment }}.json"
 

@@ -22,8 +22,9 @@ The human owner is still confirming these. If a task below needs one and it
 isn't filled in yet, ask rather than inventing a value:
 - Which Boomi process is the actual pilot for the **push-triggered** `ci.yml`
   pipeline (currently a placeholder id in `components/components.json`). Not
-  needed for a manual `workflow_dispatch` run — that resolves componentId
-  live via `list-processes.yml`.
+  needed for a manual `workflow_dispatch` run — `process_name` alone resolves
+  componentId/packageId live via `BoomiClient.find_component_by_name()` /
+  `find_latest_package()`.
 - The atom IDs for Dev, QA, PD (still placeholders in `environments/*.json`
   — the trial account's environments all show 0 runtimes, so there's no
   atom to attach yet). Environment IDs themselves are filled in.
@@ -35,32 +36,42 @@ isn't filled in yet, ask rather than inventing a value:
 
 - `scripts/boomi_client.py` — wrapper over the Boomi Platform API (Basic
   Auth via `BOOMI_TOKEN.<user>` + token; packaging, deployment, execution-
-  record polling, live component listing, latest-package lookup). Retries
-  429 (honoring `Retry-After`) and transient 5xx, raises `BoomiApiError`
-  with the parsed response body otherwise. Base URL defaults to the US
-  platform (`api.boomi.com`) — confirm the trial account is actually on
-  that region before relying on it (`BOOMI_BASE_URL` overrides it).
-  Credentials default to env vars but can be passed as kwargs.
+  record polling, live component listing/lookup-by-name, package
+  listing/latest-package lookup). Retries 429 (honoring `Retry-After`) and
+  transient 5xx, raises `BoomiApiError` with the parsed response body
+  otherwise. Base URL defaults to the US platform (`api.boomi.com`) —
+  confirm the trial account is actually on that region before relying on it
+  (`BOOMI_BASE_URL` overrides it). Credentials default to env vars but can
+  be passed as kwargs.
 - `scripts/package_component.py`, `scripts/deploy_component.py`,
   `scripts/run_tests.py` — CLI entry points the workflows call.
 - `scripts/list_processes.py` — lists live Boomi components by type; for
-  `process` (the default) also shows each one's latest packageId. This is
-  how a human finds the componentId/packageId that `ci.yml`/`cd.yml`'s
-  `workflow_dispatch` forms ask for, instead of anything being
-  hand-maintained.
+  `process` (the default) also shows each one's latest packageId. Purely
+  informational now — ci.yml/cd.yml resolve these themselves — but useful
+  for a quick look, or when a name is ambiguous and an explicit
+  componentId is needed.
+- `scripts/list_packages.py` — every package (not just latest) for one
+  process, for picking an older packageId as a rollback target.
 - `scripts/write_ad_hoc_config.py` — writes a one-process components.json-
-  shaped config for an ad-hoc `ci.yml` run.
+  shaped config for an ad-hoc `ci.yml` run; resolves `component_id` from
+  `process_name` via `find_component_by_name()` if not given explicitly.
+  Prints `resolved-component-id=<id>` on stdout (diagnostics go to stderr)
+  so a workflow step can capture it straight into `$GITHUB_OUTPUT`.
+- `scripts/resolve_latest_package.py` — same idea for `cd.yml`: resolves
+  `process_name` to its latest packageId, printing `package-id=<id>`.
 - `.github/workflows/ci.yml` — on push to `main`: package → deploy to Dev →
   run tests, using `components/components.json`. `workflow_dispatch` with
-  `process_name` + `component_id` runs one ad-hoc process instead, and (only
-  for `workflow_dispatch`) opens/closes a tracking GitHub Issue.
-- `.github/workflows/cd.yml` — `workflow_dispatch` with inputs
-  `process_name`, `package_id`, `target_environment` (qa|prod); deploys that
-  package to the chosen environment (`prod` maps to the `production` GitHub
-  Environment for its reviewer gate) and opens/closes a tracking Issue.
-- `.github/workflows/list-processes.yml` — one-off `workflow_dispatch` to
-  list live Boomi components (+ latest package, for processes) in the
-  Actions job summary.
+  just `process_name` (or a `process_name` + explicit `component_id`) runs
+  one ad-hoc process instead, and (only for `workflow_dispatch`)
+  opens/closes a tracking GitHub Issue.
+- `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name`,
+  optional `package_id` (resolves to the latest if blank), and
+  `target_environment` (qa|prod); deploys that package to the chosen
+  environment (`prod` maps to the `production` GitHub Environment for its
+  reviewer gate) and opens/closes a tracking Issue.
+- `.github/workflows/list-processes.yml` / `list-packages.yml` — one-off
+  `workflow_dispatch` lookups (components+latest-package; full package
+  history for one process), printed to the Actions job summary.
 - `.github/workflows/debug-secrets.yml` — prints SHA256 hashes of the Boomi
   secrets (never the values), to sanity-check what got saved.
 
@@ -81,6 +92,11 @@ isn't filled in yet, ask rather than inventing a value:
    does) would let the issue exist before approval; not done yet since the
    existing `production` Environment gate already covers the actual approval
    requirement.
+3. **Name resolution assumes unique process names.** `find_component_by_name()`
+   raises (failing the run) if two live components share a name and type —
+   the fix in that case is passing an explicit `component_id`/`package_id`
+   (found via `list-processes.yml`/`list-packages.yml`), not silently
+   guessing which one was meant.
 
 ## Ground rules
 
