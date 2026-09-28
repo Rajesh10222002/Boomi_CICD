@@ -1,11 +1,10 @@
 # Boomi CI/CD Pilot
 
 Automates packaging, testing, and promoting Boomi integration processes through
-**Dev → QA → PD**, driven by GitHub Actions. Every manual run opens (then
-closes) a GitHub Issue as its audit record. That's fully usable on its own
-from the Actions tab — `databricks_app/` adds an optional nicer front end
-(a live-searchable process picker) hosted as a Databricks App, which just
-triggers the same workflows rather than replacing them.
+**Dev → QA → PD**, driven entirely by GitHub Actions — no separate admin app,
+no third-party hosting, no custom login. You trigger runs from the Actions
+tab, and every manual run opens (then closes) a GitHub Issue as its audit
+record.
 
 Full design doc (architecture, decisions, open questions): see the linked plan
 shared with this repo, or `docs/PLAN.md` once exported here.
@@ -27,11 +26,9 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
   list-packages.yml  Every package (not just latest) for one process, for
                       picking an older packageId as a rollback target.
   debug-secrets.yml  Prints SHA256 hashes of the Boomi secrets (never values).
-databricks_app/  Optional Streamlit front end, hosted as a Databricks App,
-                  that triggers ci.yml/cd.yml — see "Databricks App" below.
 ```
 
-## Why no custom admin app on GitHub/the web
+## Why no custom admin app
 
 Two earlier approaches were tried and dropped:
 - **Streamlit Community Cloud** — would put the Boomi and GitHub tokens, and
@@ -51,11 +48,10 @@ workflow at all, and the `production` Environment's required reviewers (see
 setup step 4) gate PD promotions specifically. No login page, no token to
 paste anywhere, nothing to revoke beyond normal GitHub repo access.
 
-The optional `databricks_app/` front end doesn't change this: it's just a
-nicer way to fill in the same `workflow_dispatch` forms, hosted on
-infrastructure this org already has a relationship with (unlike Streamlit
-Community Cloud), with access controlled by Databricks' own App permissions
-(workspace SSO) instead of a login page or pasted token.
+(A Databricks App front end was also tried, since Databricks is a vendor
+this org already has a relationship with — but decided against for now, to
+keep everything in one place with nothing extra to deploy/maintain. The
+native `workflow_dispatch` flow below is the only supported path.)
 
 ## One-time setup (you do this, not Claude Code)
 
@@ -103,37 +99,6 @@ resolve automatically server-side (via `BoomiClient.find_component_by_name()`
    still exist as an explicit override / manual lookup if you ever need
    them (e.g. a component name isn't unique, or you want to double-check
    what resolved), but day-to-day you shouldn't need either.
-
-## Databricks App front end (optional)
-
-`databricks_app/app.py` is the earlier Streamlit admin console (process
-picker, live package lookup, promote buttons), stripped of the custom
-GitHub OAuth login — Databricks Apps are only reachable by people granted
-access to the app in the workspace, so that's the access-control layer now.
-It still only *triggers* `ci.yml`/`cd.yml`; it doesn't call Boomi's deploy
-APIs itself, so the GitHub Issue audit trail is unchanged.
-
-Setup (**this is unverified against a live deploy — the exact
-`databricks apps`/secret-scope commands may need adjusting based on what
-Databricks' CLI actually says; work through it with Claude Code rather than
-assuming this is exactly right**):
-
-1. Install/authenticate the Databricks CLI against your workspace
-   (`databricks auth login --host <your-workspace-url>` — browser-based,
-   no static token needed for this step).
-2. Create a secret scope and put these in it (values only via CLI, never
-   committed):
-   - `boomi-account-id`, `boomi-username`, `boomi-api-token` — same values
-     as the matching GitHub secrets.
-   - `github-api-token` — a fine-grained GitHub PAT scoped to just this
-     repo, "Actions: Read and write" (this is new — lets the app dispatch
-     `ci.yml`/`cd.yml` on your behalf).
-3. Create the Databricks App, binding `app.yaml`'s `valueFrom` resource
-   names to that scope's keys, then deploy `databricks_app/`'s contents to
-   it.
-4. Grant exactly the people who should have access permission on the app
-   (Databricks workspace → the app → Permissions) — that's the whole
-   access-control model, no separate login.
 
 ## What's scaffolded vs. what's still TODO
 

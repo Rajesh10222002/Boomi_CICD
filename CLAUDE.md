@@ -2,20 +2,17 @@
 
 This repo is a scaffold for a Boomi CI/CD pilot: GitHub Actions packages,
 tests, and promotes a Boomi integration process through **Dev → QA → PD**.
-`workflow_dispatch` (Actions tab → "Run workflow") is the trigger of
-record, and each manual run opens (then closes) a GitHub Issue as its audit
-record. Two earlier admin-UI approaches were tried and dropped; see
-README.md's "Why no custom admin app" for why (Streamlit Community Cloud:
-third-party credential custody; a static GitHub Pages page with a pasted
-PAT: no central token visibility/revocation). This settled on matching how
-Quanta's other Boomi/Incorta CI/CD repos (`qco-incorta-cicd`,
-`qco-incorta-ui`) already do it in production. `databricks_app/` is a third
-attempt at a nicer front end — a Databricks App (Databricks is a vendor
-this org already has a relationship with, unlike Streamlit Community
-Cloud), still just triggering the same workflows rather than replacing
-them. See README.md's "Databricks App front end" section — its exact setup
-steps are **unverified against a live deploy**, work through them with
-whoever's driving that rather than assuming they're exactly right.
+There is no custom admin app — `workflow_dispatch` (Actions tab → "Run
+workflow") is the trigger, and each manual run opens (then closes) a GitHub
+Issue as its audit record. Three admin-UI approaches were tried and
+dropped; see README.md's "Why no custom admin app" for why (Streamlit
+Community Cloud: third-party credential custody; a static GitHub Pages
+page with a pasted PAT: no central token visibility/revocation; a
+Databricks App: decided against to keep everything in one place with
+nothing extra to deploy/maintain). This settled on matching how Quanta's
+other Boomi/Incorta CI/CD repos (`qco-incorta-cicd`, `qco-incorta-ui`)
+already do it in production. Don't reintroduce a custom admin app without
+being asked to.
 
 Read `README.md` first for the layout and one-time setup the human owner is
 handling separately (Boomi API token, repo secrets, GitHub Environments —
@@ -80,16 +77,6 @@ isn't filled in yet, ask rather than inventing a value:
   history for one process), printed to the Actions job summary.
 - `.github/workflows/debug-secrets.yml` — prints SHA256 hashes of the Boomi
   secrets (never the values), to sanity-check what got saved.
-- `databricks_app/app.py` — optional Streamlit front end (process picker,
-  live package lookup, promote buttons), hosted as a Databricks App. Same
-  logic as the deleted Streamlit-Community-Cloud version (see git history:
-  `git show 189786e:app/streamlit_app.py`) minus the GitHub OAuth login —
-  Databricks App permissions are the access-control layer now. Only
-  triggers `ci.yml`/`cd.yml`; doesn't call Boomi itself. `boomi_client.py`
-  is a copy of `scripts/boomi_client.py` (kept alongside `app.py` so the
-  app's deploy doesn't depend on `scripts/` also being present) — **keep
-  these two files in sync by hand until a deploy step automates the
-  copy**; don't let them drift silently.
 
 ## What's still open
 
@@ -113,17 +100,6 @@ isn't filled in yet, ask rather than inventing a value:
    the fix in that case is passing an explicit `component_id`/`package_id`
    (found via `list-processes.yml`/`list-packages.yml`), not silently
    guessing which one was meant.
-4. **`databricks_app/app.yaml`'s schema is a best-effort guess**, not
-   verified against a real deploy — Databricks Apps' config format has
-   changed over time. When it's actually deployed, fix it based on whatever
-   error the Databricks CLI/UI gives back rather than assuming the current
-   file is right.
-5. **No automated deploy for the Databricks App yet** — no GitHub Actions
-   workflow deploys `databricks_app/` on a push, unlike everything else
-   here. Deploying is a manual `databricks apps deploy` for now; add
-   automation (matching `qco-incorta-ui`'s `deploy-databricks-app.yml`,
-   ideally via GH-OIDC federation instead of a static Databricks token)
-   once the manual path is proven to work.
 
 ## Ground rules
 
