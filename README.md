@@ -32,11 +32,11 @@ app/           Streamlit admin console (process list, single-click promote)
      (defaults to `https://api.boomi.com`; use `https://api.platform.gb.boomi.com`
      for EU/GB accounts)
 
-   Once these are set, run the **"List Boomi Processes"** workflow from the
-   Actions tab (workflow_dispatch) to see the account's real processes and
-   their componentIds in the job summary — that's how to find the real value
-   for `components/components.json` without ever putting the token in a
-   terminal or chat.
+   Once these are set, the Streamlit app lists live processes and looks up
+   packages by calling the Boomi API directly — nobody has to type a
+   componentId or packageId anywhere in the UI. If you just want to look
+   without opening the app, run the **"List Boomi Processes"** workflow from
+   the Actions tab (workflow_dispatch) to see the same data in a job summary.
 3. **GitHub Environments** — Settings → Environments → create `qa` and
    `production`. On `production`, add required reviewers if you want a human
    approval gate on top of the app's single click (see the plan doc).
@@ -49,11 +49,15 @@ app/           Streamlit admin console (process list, single-click promote)
 
 ## What's scaffolded vs. what's still TODO
 
-Everything here runs end-to-end against placeholder IDs. Before it's real:
-- Fill in the actual Boomi component/process ID(s) in `components/components.json`.
-- Fill in the real environment/atom IDs in `environments/*.json`.
+The Streamlit app and the `component_id`/`package_id` it passes through are
+live — no placeholder IDs there. Still to do:
+- Fill in the real atom IDs in `environments/*.json` once an atom/runtime is
+  attached to each Boomi environment (environment IDs are already filled in).
+- `components/components.json` still has a placeholder `component_id` — it
+  only matters for the push-triggered `ci.yml` pipeline (packages/tests
+  whatever's listed there on every push to `main`); the app-driven flow
+  doesn't touch this file at all.
 - Write the real expected-output assertions in `tests/*.json` once the pilot
   process is chosen.
-- Add the admin allow-list (GitHub usernames) to `app/streamlit_app.py`.
 
 See `CLAUDE.md` for what to hand to Claude Code next.

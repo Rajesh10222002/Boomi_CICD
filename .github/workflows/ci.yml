@@ -8,7 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       process_name:
-        description: "Process name, as it appears in components/components.json (informational only for now — the job still builds/tests every process in components.json)"
+        description: "Process name (as shown in the Streamlit app / Boomi)"
+        required: false
+      component_id:
+        description: "Boomi componentId to package+deploy+test — set by the Streamlit app, which resolves it live from Boomi. Leave blank to run the push-triggered components.json pipeline instead."
         required: false
 
 jobs:
@@ -24,6 +27,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Determine process list to package
+        id: procs
+        working-directory: scripts
+        run: |
+          if [ -n "${{ github.event.inputs.component_id }}" ]; then
+            python write_ad_hoc_config.py \
+              --name "${{ github.event.inputs.process_name }}" \
+              --component-id "${{ github.event.inputs.component_id }}" \
+              --out ../ad_hoc_components.json
+            echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "config=../components/components.json" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Package component(s)
         working-directory: scripts
         env:
@@ -31,7 +48,7 @@ jobs:
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: python package_component.py --config ../components/components.json --out ../packages.json
+        run: python package_component.py --config ${{ steps.procs.outputs.config }} --out ../packages.json
 
       - name: Deploy package(s) to Dev
         working-directory: scripts
@@ -41,7 +58,7 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          python deploy_component.py --process-name PLACEHOLDER-sample-process \
+          python deploy_component.py --process-name "${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}" \
             --packages ../packages.json --env dev --config ../environments/dev.json
 
       - name: Run test cases against Dev

@@ -3,9 +3,8 @@ Boomi CI/CD admin console.
 
 STATUS: scaffold. GitHub OAuth login (CLAUDE.md item 1) and the Actions-API
 status/audit/dispatch calls (CLAUDE.md item 3) are both wired up below.
-Promoting to QA/PD still needs a package_id typed in by hand — cd.yml
-requires one and there's no automated way yet to read it back out of the
-ci.yml run's packages.json artifact.
+The process list and the package to promote both come live from the Boomi
+API — nobody types a componentId or packageId anywhere in this UI.
 
 Secrets this app expects (Streamlit Community Cloud "Secrets" panel, or
 .streamlit/secrets.toml locally — never commit that file):
@@ -19,17 +18,23 @@ Secrets this app expects (Streamlit Community Cloud "Secrets" panel, or
     GITHUB_API_TOKEN            fine-grained PAT or GitHub App token, scoped to
                                 this repo's Actions/Checks/Environments only
     ADMIN_USERNAMES             list of allowed GitHub usernames
+    BOOMI_ACCOUNT_ID            same Boomi trial account as the GitHub secrets
+    BOOMI_USERNAME              "BOOMI_TOKEN.<your-boomi-login-email>"
+    BOOMI_API_TOKEN
+    BOOMI_BASE_URL              optional — only if the account isn't on the
+                                US platform, see scripts/boomi_client.py
 """
 
-import json
 import secrets as secrets_lib
+import sys
 from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
 import streamlit as st
 
-COMPONENTS_PATH = Path(__file__).parent.parent / "components" / "components.json"
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+from boomi_client import BoomiClient  # noqa: E402 - needs sys.path set up first
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -132,9 +137,34 @@ def _check_authorized() -> bool:
     return False
 
 
-def _load_processes():
-    with open(COMPONENTS_PATH) as f:
-        return json.load(f)["processes"]
+@st.cache_resource
+def _boomi_client() -> BoomiClient:
+    return BoomiClient(
+        account_id=_required_secret("BOOMI_ACCOUNT_ID"),
+        username=_required_secret("BOOMI_USERNAME"),
+        token=_required_secret("BOOMI_API_TOKEN"),
+        base_url=st.secrets.get("BOOMI_BASE_URL") or None,
+    )
+
+
+@st.cache_data(ttl=60)
+def _list_live_processes() -> list:
+    """Live {name, componentId} pairs from Boomi, for the process picker."""
+    try:
+        return _boomi_client().list_processes()
+    except Exception as exc:  # noqa: BLE001 - degrade to an empty list rather than crash the page
+        st.error(f"Could not list Boomi processes: {exc}")
+        return []
+
+
+@st.cache_data(ttl=30)
+def _find_latest_package(component_id: str):
+    """The most recently created package for this process, or None if it's never been packaged."""
+    try:
+        return _boomi_client().find_latest_package(component_id)
+    except Exception as exc:  # noqa: BLE001 - degrade to "no package found" rather than crash the page
+        st.caption(f"Could not look up latest package: {exc}")
+        return None
 
 
 def _github_api_headers() -> dict:
@@ -222,28 +252,31 @@ def main():
     st.title("Boomi CI/CD Admin Console")
     st.caption(f"Signed in as {st.session_state['gh_username']}")
 
-    processes = _load_processes()
+    processes = _list_live_processes()
+    if not processes:
+        st.warning("No live Boomi processes found (or the BOOMI_* secrets aren't configured yet).")
+        st.stop()
+
+    component_id_by_name = {p["name"]: p["componentId"] for p in processes}
     selected = st.multiselect(
         "Processes",
-        options=[p["name"] for p in processes],
-        help="Pick one or more processes to build, test, or promote.",
+        options=sorted(component_id_by_name),
+        help="Live process names from Boomi — pick one or more to build, test, or promote.",
     )
 
     for name in selected:
+        component_id = component_id_by_name[name]
         st.subheader(name)
         status = _get_latest_run_status(name)
         st.write(f"Latest Dev test status: **{status}**")
 
-        package_id = st.text_input(
-            "Package ID to promote",
-            key=f"package-id-{name}",
-            help="From the ci.yml run's packages.json artifact — not looked up automatically yet.",
-        )
+        package_id = _find_latest_package(component_id)
+        st.caption(f"Latest package: {package_id or 'none yet — build & deploy to Dev first'}")
 
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button(f"Build & Deploy to Dev — {name}", key=f"dev-{name}"):
-                _trigger_workflow("ci.yml", {"process_name": name})
+                _trigger_workflow("ci.yml", {"process_name": name, "component_id": component_id})
         with col2:
             qa_disabled = status != "passed" or not package_id
             if st.button(f"Promote to QA — {name}", key=f"qa-{name}", disabled=qa_disabled):

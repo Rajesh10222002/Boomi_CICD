@@ -3,8 +3,9 @@ Thin wrapper over the Boomi AtomSphere Platform API.
 
 Auth: Basic Auth with username "BOOMI_TOKEN.<login-email>" and the API
 token value as the password (see README.md for how to generate one).
-Reads credentials from environment variables so nothing secret ever
-lives in a file that gets committed:
+Defaults to reading credentials from environment variables so nothing
+secret ever lives in a file that gets committed (BoomiClient(...) also
+accepts them as explicit kwargs, for callers with their own secrets store):
 
     BOOMI_ACCOUNT_ID
     BOOMI_USERNAME      (already in "BOOMI_TOKEN.<email>" form)
@@ -37,11 +38,18 @@ class BoomiApiError(RuntimeError):
 
 
 class BoomiClient:
-    def __init__(self, max_retries=3, backoff_factor=1.0):
-        self.account_id = _require_env("BOOMI_ACCOUNT_ID")
-        self.username = _require_env("BOOMI_USERNAME")
-        self.token = _require_env("BOOMI_API_TOKEN")
-        self.base_url = os.environ.get("BOOMI_BASE_URL") or "https://api.boomi.com"
+    def __init__(self, account_id=None, username=None, token=None, base_url=None, max_retries=3, backoff_factor=1.0):
+        """
+        Credentials default to the BOOMI_ACCOUNT_ID / BOOMI_USERNAME /
+        BOOMI_API_TOKEN / BOOMI_BASE_URL env vars (what the CLI scripts and
+        workflows use). Callers that keep credentials elsewhere — the
+        Streamlit app reads them from st.secrets — can pass them in directly
+        instead of exporting env vars.
+        """
+        self.account_id = account_id or _require_env("BOOMI_ACCOUNT_ID")
+        self.username = username or _require_env("BOOMI_USERNAME")
+        self.token = token or _require_env("BOOMI_API_TOKEN")
+        self.base_url = base_url or os.environ.get("BOOMI_BASE_URL") or "https://api.boomi.com"
         self.session = requests.Session()
         self.session.auth = (self.username, self.token)
         self.session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
@@ -164,6 +172,31 @@ class BoomiClient:
             results.extend(data.get("result", []))
             query_token = data.get("queryToken")
         return results[:limit]
+
+    def list_processes(self, component_type="process"):
+        """Live {name, componentId} pairs for the given component type, for populating a picker."""
+        return [
+            {"name": c.get("name", ""), "componentId": c.get("componentId", "")}
+            for c in self.query_components(component_type=component_type)
+            if not c.get("deleted")
+        ]
+
+    def find_latest_package(self, component_id):
+        """
+        Most recently created PackagedComponent for this componentId, or
+        None if it's never been packaged. Lets callers (the Streamlit app)
+        resolve "the package to promote" without anyone typing a packageId.
+        """
+        query = {
+            "QueryFilter": {
+                "expression": {"operator": "EQUALS", "property": "componentId", "argument": [component_id]}
+            }
+        }
+        resp = self._request("POST", self._url("PackagedComponent", "query"), json=query)
+        results = resp.json().get("result", [])
+        if not results:
+            return None
+        return max(results, key=lambda r: r.get("createdDate", ""))["packageId"]
 
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):
         """Poll an execution until it leaves an in-progress state or timeout_s elapses."""
