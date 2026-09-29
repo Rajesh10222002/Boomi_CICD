@@ -35,13 +35,20 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # this job commits the deployment-ledger update
+  contents: write # the "build-and-deploy" job commits the deployment-ledger update
   issues: write
   deployments: write
 
 jobs:
-  package-and-test:
+  # Resolves the process and opens the tracking issue *before* the
+  # "build-and-deploy" job's environment gate — so whoever's reviewing the
+  # pending deployment sees the linked issue (with a before/after diff)
+  # already open, not just raw inputs.
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      resolved-component-id: ${{ steps.procs.outputs.resolved-component-id }}
+      issue-number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +59,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Resolve process to package
+      - name: Resolve process
         id: procs
         working-directory: scripts
         env:
@@ -65,21 +72,28 @@ jobs:
             --name "${{ github.event.inputs.process_name }}" \
             --component-id "${{ github.event.inputs.component_id }}" \
             --out ../ad_hoc_components.json >> "$GITHUB_OUTPUT"
-          echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
 
-      # Runs after the step above so the issue shows the resolved
-      # componentId even when only a process_name was given.
+      # Best-effort, display-only lookup of what's currently in Dev (before
+      # this run) so the issue/job summary show a before -> after diff for
+      # whoever approves the "build-and-deploy" job's environment gate.
+      - name: Describe current Dev state
+        id: current
+        working-directory: scripts
+        run: python describe_current.py --name "${{ github.event.inputs.process_name }}" --environment dev >> "$GITHUB_OUTPUT"
+
       - name: Create tracking issue
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          diff_line="dev: ${{ steps.current.outputs.current }} -> ${{ github.event.inputs.version }} (pending build)"
           issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name }} (${{ github.event.inputs.version }})"
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ github.event.inputs.process_name }}",
           "component_id": "${{ steps.procs.outputs.resolved-component-id || github.event.inputs.component_id }}",
           "version": "${{ github.event.inputs.version }}",
+          "diff": "$diff_line",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ github.event.inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -94,6 +108,39 @@ jobs:
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
+          echo "## Dev deploy: ${{ github.event.inputs.process_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
+
+  # Environment-gated: if the "dev" GitHub Environment has required
+  # reviewers configured (Settings -> Environments -> dev), this job waits
+  # for approval before doing anything — the "prepare" job above already
+  # opened the tracking issue and printed the diff to its job summary, so
+  # the reviewer isn't approving blind.
+  build-and-deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write ad-hoc config
+        working-directory: scripts
+        run: |
+          python write_ad_hoc_config.py \
+            --name "${{ github.event.inputs.process_name }}" \
+            --component-id "${{ needs.prepare.outputs.resolved-component-id }}" \
+            --out ../ad_hoc_components.json
+
       - name: Package component(s)
         working-directory: scripts
         env:
@@ -101,7 +148,7 @@ jobs:
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: python package_component.py --config ${{ steps.procs.outputs.config }} --version "${{ github.event.inputs.version }}" --out ../packages.json
+        run: python package_component.py --config ../ad_hoc_components.json --version "${{ github.event.inputs.version }}" --out ../packages.json
 
       - name: Create deployment record
         id: create_deployment
@@ -201,7 +248,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
 
       - name: Close tracking issue
-        if: always() && steps.create_issue.outputs.issue-number != ''
+        if: always() && needs.prepare.outputs.issue-number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -210,9 +257,9 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}/comments"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}/comments"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"

@@ -70,9 +70,10 @@ GitHub Issue with the request's details (who, what, when, why) and closes it
 with the outcome when done — matching how Quanta's other Boomi/Incorta CI/CD
 repos (`qco-incorta-cicd`, `qco-incorta-ui`) already do this in production.
 Access control is entirely GitHub's: only repo collaborators can dispatch a
-workflow at all, and the `production` Environment's required reviewers (see
-setup step 4) gate PD promotions specifically. No login page, no token to
-paste anywhere, nothing to revoke beyond normal GitHub repo access.
+workflow at all, and each `dev`/`qa`/`production` Environment's required
+reviewers (see setup step 3) gate that environment's deploys specifically.
+No login page, no token to paste anywhere, nothing to revoke beyond normal
+GitHub repo access.
 
 (A Databricks App front end was also tried, since Databricks is a vendor
 this org already has a relationship with — but decided against for now, to
@@ -94,14 +95,21 @@ native `workflow_dispatch` flow below is the only supported path.)
 
    Use the **"Debug Boomi Secrets"** workflow afterward to sanity-check what
    got saved, without it ever printing the actual values.
-3. **GitHub Environments** — Settings → Environments → create `qa` and
-   `production`. On `production`, add required reviewers as the human
-   approval gate on PD promotions.
+3. **GitHub Environments** — Settings → Environments → create `dev`, `qa`,
+   and `production` (every workflow references one of these three by name,
+   so create all of them even if you don't add reviewers to all of them
+   yet). On whichever ones should require approval before that job runs —
+   `dev` gates `ci.yml`; `qa`/`production` gate `cd.yml` and, through it,
+   `rollback.yml` — add yourself (or whoever should approve) as a required
+   reviewer. Every run opens its tracking issue *before* this gate, with a
+   before → after diff in the issue body and that run's job summary, so
+   the reviewer isn't approving blind — check those before clicking Approve
+   in the "Review deployments" prompt GitHub shows on the run.
 4. **Who can trigger runs** — controlled entirely by GitHub repo access, not
    by anything in this repo: add exactly the people who should be able to
-   dispatch `ci.yml`/`cd.yml` as collaborators (Settings → Collaborators and
-   teams), and rely on step 3's required reviewers for the smaller set who
-   can approve a PD promotion specifically.
+   dispatch `ci.yml`/`cd.yml`/`rollback.yml` as collaborators (Settings →
+   Collaborators and teams), and rely on step 3's required reviewers for
+   the smaller set who can approve a specific environment's deploys.
 
 ## Using it
 
@@ -114,8 +122,10 @@ deployment ledger, not a raw Boomi lookup.
    `process_name` and `version` (e.g. `v1.1`) are both required (leave
    `component_id` blank unless the name isn't unique). `version` becomes
    the packaged component's actual version in Boomi and is recorded in the
-   ledger. Opens a tracking Issue, closes it with the outcome when the run
-   finishes.
+   ledger. Opens a tracking Issue with a `dev: <before> -> <after>` diff and
+   prints the same to the run's job summary, then waits on the `dev`
+   Environment's reviewers (if any are configured) before actually
+   building/deploying.
 2. **Promote to QA/PD**: Actions tab → **`cd.yml`** → Run workflow →
    `process_name`, `target_environment` (`qa` or `prod`). There's no
    `package_id` field here — promotion resolves whatever the deployment
@@ -127,8 +137,8 @@ deployment ledger, not a raw Boomi lookup.
    against the ledger, never an arbitrary guess). A process (or version)
    that hasn't actually been deployed to the environment below can't be
    promoted — the run fails with a clear message rather than guessing.
-   Same tracking-Issue pattern; promoting to `prod` additionally waits on
-   the `production` Environment's reviewers.
+   Same tracking-Issue-with-diff pattern as `ci.yml`; waits on the target
+   Environment's reviewers (`qa` or `production`) before deploying.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
    `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it
@@ -139,9 +149,10 @@ deployment ledger, not a raw Boomi lookup.
    process to this environment recorded yet, rather than guessing — pass an
    explicit `package_id` instead (one that's genuinely been live in this
    environment; check `deployments/ledger.csv` or the job summary from a
-   previous promotion). Goes through the same tracking issue, deployment
-   record, ledger update, and (for prod) required-reviewer approval as a
-   normal promotion.
+   previous promotion). Goes through the same tracking issue (with the
+   before → after diff), deployment record, ledger update, and required-
+   reviewer approval on the target environment as a normal promotion —
+   including for `dev`, if the `dev` Environment has reviewers configured.
 4. **"List Boomi Processes"** and **component_id** input on `ci.yml`
    still exist as an explicit override / manual lookup if you ever need
    them (e.g. a component name isn't unique, or you want to double-check

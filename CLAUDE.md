@@ -33,9 +33,12 @@ isn't filled in yet, ask rather than inventing a value:
 - The atom IDs for Dev, QA, PD (still placeholders in `environments/*.json`
   — the trial account's environments all show 0 runtimes, so there's no
   atom to attach yet). Environment IDs themselves are filled in.
-- Whether PD promotion needs a required-reviewer approval in GitHub (assumed
-  yes, environment `production` is referenced in `cd.yml`, but it's not
-  created yet — that's a human step).
+- Whether PD promotion needs a required-reviewer approval in GitHub — now
+  moot for the *mechanism* (every workflow references a `dev`/`qa`/
+  `production` GitHub Environment, so any of them can gate on reviewers),
+  but which environments actually have reviewers configured, and who, is
+  still a human Settings step (the owner is starting by adding themselves
+  as the reviewer everywhere, to test the gate end to end).
 
 ## What's already here (working)
 
@@ -90,6 +93,13 @@ isn't filled in yet, ask rather than inventing a value:
   order via the Boomi API — hard-fails if the ledger doesn't have enough
   per-environment rows yet (pass an explicit `package_id` instead). Always
   writes a job-summary table when it succeeds.
+- `scripts/describe_current.py` — display-only (never used for a
+  control-flow decision, unlike `resolve_current_package.py`): prints a
+  one-line human-readable description of whatever `deployments/current.csv`
+  says is live for a process+environment right now, or
+  "(nothing deployed yet)". Used by `ci.yml`/`cd.yml`'s `prepare` step to
+  build the before -> after diff shown in the tracking issue and job
+  summary, ahead of the environment-protection approval gate.
 - `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
   only (dropped push/pull_request triggers — packaging/deploying to Dev is
   deliberately a manual action now, not something that fires on every
@@ -99,10 +109,14 @@ isn't filled in yet, ask rather than inventing a value:
   no longer reads `components/components.json` at all. `component_id`
   stays optional, only for disambiguating a non-unique name. `version`
   becomes the Boomi package's `packageVersion` and is recorded in the
-  ledger. Opens/closes a tracking GitHub Issue on every run, posts a native
-  GitHub Deployment record (`dev`), records the deploy into
-  `deployments/{ledger,current}.csv` and pushes that commit back, and has
-  a `concurrency` group keyed on `process_name`.
+  ledger. Split into a `prepare` job (resolves the process, opens a
+  tracking Issue with a `dev: <before> -> <after>` diff via
+  `describe_current.py`, prints the same to the job summary) and a
+  `build-and-deploy` job (`environment: dev` — gated on that Environment's
+  required reviewers if any are configured; packages, deploys, posts a
+  native GitHub Deployment record, records the ledger, runs tests, closes
+  the issue), mirroring `cd.yml`'s split so the reviewer isn't approving
+  blind. Has a `concurrency` group keyed on `process_name`.
 - `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name`,
   `target_environment` (qa|prod), and an optional `version` — **no
   `package_id` input on this form**. Promotion resolves the package via
@@ -112,11 +126,13 @@ isn't filled in yet, ask rather than inventing a value:
   that label in `deployments/ledger.csv`, still only ever something that
   was actually deployed to that lower environment — never an arbitrary
   package. Records the result into the ledger and opens/closes a tracking
-  Issue. Split into a `prepare` job (resolves the package, opens the
+  Issue with a `<target_env>: <before> -> <after>` diff (via
+  `describe_current.py`, same pattern as `ci.yml`), also printed to the
+  job summary. Split into a `prepare` job (resolves the package, opens the
   issue) and a `deploy` job (the environment-gated one, posts a GitHub
   Deployment record, records the ledger, closes the issue) so a reviewer
-  approving a prod promotion sees the linked issue, not just raw inputs —
-  see "What's still open" #2 below, now closed. Also declares a separate
+  approving sees the linked issue and diff, not just raw inputs — see
+  "What's still open" #2 below, now closed. Also declares a separate
   `workflow_call` interface (`process_name`, `package_id` required,
   `target_environment`, `comment`) so `rollback.yml` can invoke it
   directly with an explicit older package — the *only* path into this
@@ -202,6 +218,17 @@ isn't filled in yet, ask rather than inventing a value:
    ledger needs two entries for that environment before its per-environment
    rollback path is exercised instead of hitting the "not enough history"
    hard-fail).
+7. **Every workflow now references a `dev`/`qa`/`production` GitHub
+   Environment for its approval gate** (`ci.yml` newly split into
+   `prepare`/`build-and-deploy` for this — see its entry above), and every
+   `prepare`-style job writes a before -> after diff to the tracking issue
+   and job summary before that gate. Not yet exercised end-to-end against
+   real required reviewers on all three Environments — the owner is
+   starting by adding themselves as reviewer everywhere to test the gate
+   (see the required-reviewer bullet under "Context you don't have yet").
+   `dev` likely doesn't exist yet as a
+   configured Environment (it auto-creates on first reference with no
+   protection rules, i.e. ungated, until reviewers are added to it).
 
 ## Ground rules
 

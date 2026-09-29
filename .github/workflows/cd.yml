@@ -109,11 +109,21 @@ jobs:
             python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" --version "${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Best-effort, display-only lookup of what's currently in the
+      # *target* environment (before this promotion) so the issue/job
+      # summary show a before -> after diff for whoever approves the
+      # "deploy" job's environment gate.
+      - name: Describe current target-environment state
+        id: current
+        working-directory: scripts
+        run: python describe_current.py --name "${{ inputs.process_name }}" --environment "${{ inputs.target_environment }}" >> "$GITHUB_OUTPUT"
+
       - name: Create tracking issue
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          diff_line="${{ inputs.target_environment }}: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
           issue_title="Promote ${{ inputs.process_name }} to ${{ inputs.target_environment }}"
           issue_body=$(cat <<EOF
           {
@@ -121,6 +131,7 @@ jobs:
           "package_id": "${{ steps.resolve.outputs.package-id }}",
           "version": "${{ steps.resolve.outputs.version }}",
           "target_environment": "${{ inputs.target_environment }}",
+          "diff": "$diff_line",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -134,6 +145,12 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
+
+          echo "## Promote ${{ inputs.process_name }} to ${{ inputs.target_environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: prepare
