@@ -63,52 +63,62 @@ isn't filled in yet, ask rather than inventing a value:
   Prints `resolved-component-id=<id>` on stdout (diagnostics go to stderr)
   so a workflow step can capture it straight into `$GITHUB_OUTPUT`.
 - `scripts/update_deployment_ledger.py` — appends to `deployments/ledger.csv`
-  and upserts `deployments/current.csv` after a successful deploy. Pure
-  file I/O (no Boomi/GitHub calls) — the calling workflow step does the
+  and upserts `deployments/current.csv` after a successful deploy. Both now
+  have a `version` column (the label `ci.yml`'s `version` input assigned at
+  build time). `--component-id`/`--version` are optional: if omitted, looks
+  up the most recent ledger row for the same `--package-id` and inherits
+  its values — this is how `cd.yml`'s ledger step stays correct for a
+  rollback's explicit `package_id`, which it otherwise has no metadata for.
+  Pure file I/O (no Boomi/GitHub calls) — the calling workflow step does the
   `git commit`/`push`. See `deployments/README.md`.
 - `scripts/resolve_current_package.py` — for `cd.yml`: resolves
-  `process_name` + `--environment` to the packageId `deployments/current.csv`
-  says is live there right now, printing `package-id=<id>` and
-  `component-id=<id>`. Falls back to Boomi's "latest ever packaged" lookup
-  (the old `resolve_latest_package.py`, since removed — nothing else called
-  it) if there's no ledger row yet.
+  `process_name` + `--environment` to the packageId/componentId/version
+  `deployments/current.csv` says is live there right now. Deliberately has
+  **no fallback** to Boomi's "latest ever packaged" lookup (the old
+  `resolve_latest_package.py`, since removed) — if there's no ledger row,
+  it hard-fails. That's the enforcement mechanism for "a process can only
+  be promoted from an environment it's actually been deployed to."
 - `scripts/resolve_rollback_package.py` — for `rollback.yml`: resolves
-  `process_name` + `--environment` to the packageId that was actually live
-  in that environment just before the current one (`--skip N` for further
-  back), read from `deployments/ledger.csv` with real timestamps. Falls
-  back to global package-creation order via the Boomi API (ignoring
-  environment) if the ledger doesn't have enough per-environment rows yet.
-  Always writes a job-summary table either way.
+  `process_name` + `--environment` to the packageId/componentId/version
+  that was actually live in that environment just before the current one
+  (`--skip N` for further back), read from `deployments/ledger.csv` with
+  real timestamps. Also has **no fallback** to global package-creation
+  order via the Boomi API — hard-fails if the ledger doesn't have enough
+  per-environment rows yet (pass an explicit `package_id` instead). Always
+  writes a job-summary table when it succeeds.
 - `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
   only (dropped push/pull_request triggers — packaging/deploying to Dev is
   deliberately a manual action now, not something that fires on every
-  commit; see "What's still open" #5). `process_name` (or a `process_name` +
-  explicit `component_id`) runs one ad-hoc process; leaving both blank
-  packages/deploys everything in `components/components.json` instead.
-  Opens/closes a tracking GitHub Issue on every run, posts a native GitHub
-  Deployment record (`dev`), records the deploy into
-  `deployments/{ledger,current}.csv` and pushes that commit back, and has
-  a `concurrency` group keyed on `process_name` (push/PR runs share one
-  bucket since they all target `components.json`).
-- `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name`,
-  optional `package_id` (blank = whatever the ledger says is currently
-  deployed one environment down — Dev's for a `qa` promotion, QA's for
-  `prod`), and `target_environment` (qa|prod); deploys that package to the
-  chosen environment (`prod` maps to the `production` GitHub Environment
-  for its reviewer gate), records it into the ledger, and opens/closes a
-  tracking Issue. Split into a `prepare` job (resolves the package, opens
-  the issue) and a `deploy` job (the environment-gated one, posts a
-  GitHub Deployment record, records the ledger, closes the issue) so a
-  reviewer approving a prod promotion sees the linked issue, not just raw
-  inputs — see "What's still open" #2 below, now closed. Also declares
-  `workflow_call` inputs so `rollback.yml` can invoke it directly, reusing
-  the same issue/approval/deployment-record/ledger path for a rollback.
-  Has a `concurrency` group keyed on process+environment.
+  commit; see "What's still open" #5). Requires `version` (e.g. `v1.1` —
+  becomes the Boomi package's `packageVersion` and is recorded in the
+  ledger). `process_name` (or a `process_name` + explicit `component_id`)
+  runs one ad-hoc process; leaving both blank packages/deploys everything
+  in `components/components.json` instead. Opens/closes a tracking GitHub
+  Issue on every run, posts a native GitHub Deployment record (`dev`),
+  records the deploy into `deployments/{ledger,current}.csv` and pushes
+  that commit back, and has a `concurrency` group keyed on `process_name`.
+- `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name` and
+  `target_environment` (qa|prod) only — **no `package_id` input on this
+  form**. Promotion always resolves the package via
+  `resolve_current_package.py` (whatever the ledger says is currently
+  deployed one environment down), records it into the ledger, and
+  opens/closes a tracking Issue. Split into a `prepare` job (resolves the
+  package, opens the issue) and a `deploy` job (the environment-gated one,
+  posts a GitHub Deployment record, records the ledger, closes the issue)
+  so a reviewer approving a prod promotion sees the linked issue, not just
+  raw inputs — see "What's still open" #2 below, now closed. Also declares
+  a separate `workflow_call` interface (`process_name`, `package_id`
+  required, `target_environment`, `comment`) so `rollback.yml` can invoke
+  it directly with an explicit older package — the *only* path into this
+  workflow that accepts an arbitrary `package_id` — reusing the same
+  issue/approval/deployment-record/ledger machinery for a rollback. Has a
+  `concurrency` group keyed on process+environment.
 - `.github/workflows/rollback.yml` — `workflow_dispatch` with
   `process_name`, `target_environment` (qa|prod), optional `package_id`
   (auto-resolves via `scripts/resolve_rollback_package.py` to the package
   actually live in that environment just before the current one, from the
-  ledger, if left blank). Delegates the actual deploy to `cd.yml`.
+  ledger, if left blank — fails if there isn't enough per-environment
+  history). Delegates the actual deploy to `cd.yml`'s `workflow_call`.
 - `.github/workflows/list-processes.yml` / `list-packages.yml` — one-off
   `workflow_dispatch` lookups (components+latest-package; full package
   history for one process), printed to the Actions job summary.
@@ -122,7 +132,12 @@ isn't filled in yet, ask rather than inventing a value:
    URL and polls the Execution Record API for `COMPLETE`. Confirm this
    matches how the actual pilot process is triggered (it may be a different
    listener type) once that process is chosen, and fill in the real
-   assertion logic (`_check_expectation()` is a stub).
+   assertion logic (`_check_expectation()` is a stub). Until then, a test
+   case whose `listener_url` is still the placeholder is **skipped** (not a
+   failure) so `ci.yml` can still succeed — confirmed against a real run
+   (`Boomi Basics Demo`, run 36540110917) where packaging/deploy/ledger all
+   succeeded and only the still-templated `tests/sample_test_case.json`
+   was skipped.
 2. ~~The tracking issue is created inside the gated job~~ — fixed: `cd.yml`
    now splits into `prepare` (resolves the package, opens the issue —
    ungated) and `deploy` (the environment-gated job, posts a Deployment
@@ -156,6 +171,15 @@ isn't filled in yet, ask rather than inventing a value:
    that's fixed; it's meant to be a deliberate developer action. If a
    push-triggered path is wanted again later, it needs to be re-added
    on purpose, not assumed.
+6. **The "must be deployed one environment down first" gate and the
+   `version` input are new and only exercised against real Boomi data for
+   the `ci.yml` -> Dev leg so far** (see item #1's note on run 36540110917).
+   Still to be confirmed against the real account: `cd.yml` promoting Dev's
+   current package to `qa`, then `qa`'s to `prod`, and `rollback.yml`
+   resolving a *second* distinct promotion to the same environment (the
+   ledger needs two entries for that environment before its per-environment
+   rollback path is exercised instead of hitting the "not enough history"
+   hard-fail).
 
 ## Ground rules
 

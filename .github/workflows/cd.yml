@@ -7,10 +7,6 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
-      package_id:
-        description: "Boomi packaged component id to deploy — optional, resolves to process_name's latest package if left blank. For a rollback, use the 'Rollback' workflow instead, or 'List Boomi Packages' to find an older one to pass here."
-        required: false
-        type: string
       target_environment:
         description: "Environment to promote into"
         required: true
@@ -22,6 +18,11 @@ on:
         description: "Optional note about this promotion (shown in the tracking issue)"
         required: false
         type: string
+      # No package_id here on purpose: a promotion always takes whatever's
+      # currently deployed one environment down (see "Resolve" step below).
+      # A process that was never deployed to Dev cannot be promoted straight
+      # to QA. The only place an explicit, older package_id is accepted is
+      # the workflow_call interface below, used exclusively by rollback.yml.
 
   # Lets rollback.yml redeploy an older package through this same workflow,
   # so a rollback gets the identical tracking-issue / approval-gate /
@@ -63,6 +64,7 @@ jobs:
     outputs:
       package-id: ${{ steps.resolve.outputs.package-id }}
       component-id: ${{ steps.resolve.outputs.component-id }}
+      version: ${{ steps.resolve.outputs.version }}
       issue-number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - uses: actions/checkout@v4
@@ -74,11 +76,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Promoting means "take whatever's currently deployed in the
+      # Promoting always means "take whatever's currently deployed in the
       # environment below this one" (Dev -> QA, QA -> PD), read from this
-      # repo's own deployment ledger — not "the most recently built
-      # package", which could be a version that was built but never
-      # actually promoted. See deployments/README.md.
+      # repo's own deployment ledger — never an arbitrary package that was
+      # built but never actually deployed there. This is enforced
+      # structurally, not just a default: workflow_dispatch (the human
+      # form above) has no package_id input at all, so `inputs.package_id`
+      # is only ever non-empty when this workflow is invoked via
+      # workflow_call — i.e. by rollback.yml, the one deliberate exception.
+      # resolve_current_package.py has no Boomi-API fallback: if this
+      # process was never actually deployed to the environment below, the
+      # run fails here rather than guessing. See deployments/README.md.
       - name: Resolve package_id if needed
         id: resolve
         working-directory: scripts
@@ -106,6 +114,7 @@ jobs:
           {
           "process_name": "${{ inputs.process_name }}",
           "package_id": "${{ steps.resolve.outputs.package-id }}",
+          "version": "${{ steps.resolve.outputs.version }}",
           "target_environment": "${{ inputs.target_environment }}",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ inputs.comment }}",
@@ -188,6 +197,7 @@ jobs:
             --component-id "${{ needs.prepare.outputs.component-id }}" \
             --environment "$env_name" \
             --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
             --action promote --status success \
             --requested-by "${{ github.actor }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \

@@ -6,11 +6,12 @@ name: Rollback - Redeploy Previous Package
 #
 # Leave package_id blank to auto-pick the package that was actually live
 # in target_environment just before the current one, read from this
-# repo's deployment ledger (deployments/ledger.csv) with real timestamps —
-# see resolve_rollback_package.py for the fallback used if the ledger
-# doesn't have enough history yet. The job summary always prints the
-# candidate table either way, so you can sanity-check the choice or
-# override it with an explicit package_id.
+# repo's deployment ledger (deployments/ledger.csv) with real timestamps.
+# There's no fallback if the ledger doesn't have enough history for this
+# process+environment yet — that fails loudly (pass an explicit
+# package_id instead) rather than guessing from Boomi's global package
+# list. When resolved automatically, the job summary always prints the
+# candidate table so you can sanity-check the choice.
 #
 # Delegates to cd.yml (via workflow_call) for the actual deploy, so a
 # rollback goes through the exact same tracking issue, deployment record,

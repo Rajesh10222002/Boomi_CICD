@@ -30,10 +30,7 @@ def _trigger_process(test_case):
     trigger = test_case["trigger"]
     if trigger["type"] != "http_post":
         raise NotImplementedError(f"Trigger type '{trigger['type']}' not implemented yet")
-    listener_url = trigger["listener_url"]
-    if listener_url.startswith("REPLACE-WITH"):
-        raise SystemExit(f"Test case '{test_case['name']}' still has a placeholder listener_url.")
-    resp = requests.post(listener_url, json=trigger["payload"], timeout=30)
+    resp = requests.post(trigger["listener_url"], json=trigger["payload"], timeout=30)
     resp.raise_for_status()
     return resp
 
@@ -66,10 +63,16 @@ def main():
         sys.exit(1)
 
     failures = []
+    skipped = []
     for path in test_files:
         with open(path) as f:
             test_case = json.load(f)
         name = test_case["name"]
+        listener_url = test_case.get("trigger", {}).get("listener_url", "")
+        if listener_url.startswith("REPLACE-WITH"):
+            print(f"Skipping test case '{name}': still has a placeholder listener_url (template, not filled in yet).")
+            skipped.append(name)
+            continue
         print(f"Running test case: {name}")
         try:
             _trigger_process(test_case)
@@ -89,7 +92,11 @@ def main():
             print(f"  - {name}: {reason}")
         sys.exit(1)
 
-    print(f"\nAll {len(test_files)} test case(s) passed.")
+    ran = len(test_files) - len(skipped)
+    if skipped:
+        print(f"\n{ran} test case(s) passed, {len(skipped)} skipped (placeholder, not filled in yet): {', '.join(skipped)}")
+    else:
+        print(f"\nAll {len(test_files)} test case(s) passed.")
 
 
 if __name__ == "__main__":

@@ -106,9 +106,13 @@ class BoomiClient:
             message = body.get("message") or body.get("errorMessage") or body
         raise BoomiApiError(resp.status_code, message, response_body=body)
 
-    def create_packaged_component(self, component_id, notes="CI build"):
-        """Package a component version. Returns the new packageId."""
-        body = {"componentId": component_id, "packageVersion": "", "notes": notes}
+    def create_packaged_component(self, component_id, package_version="", notes="CI build"):
+        """
+        Package a component version, labeled with package_version (e.g.
+        "v1.1") so it shows up as a meaningful version in Boomi's own UI
+        instead of an opaque auto-generated one. Returns the new packageId.
+        """
+        body = {"componentId": component_id, "packageVersion": package_version, "notes": notes}
         resp = self._request("POST", self._url("PackagedComponent"), json=body)
         return resp.json()["packageId"]
 

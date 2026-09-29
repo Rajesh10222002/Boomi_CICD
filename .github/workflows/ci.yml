@@ -13,6 +13,9 @@ name: Build & Deploy to Dev
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: "Version label for this package, e.g. v1.1 — the version being updated in the Boomi process. Recorded in Boomi's own packageVersion and in this repo's deployment ledger."
+        required: true
       process_name:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: false
@@ -74,11 +77,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name || 'components.json processes' }}"
+          issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name || 'components.json processes' }} (${{ github.event.inputs.version }})"
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ github.event.inputs.process_name }}",
           "component_id": "${{ steps.procs.outputs.resolved-component-id || github.event.inputs.component_id }}",
+          "version": "${{ github.event.inputs.version }}",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ github.event.inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -100,7 +104,7 @@ jobs:
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: python package_component.py --config ${{ steps.procs.outputs.config }} --out ../packages.json
+        run: python package_component.py --config ${{ steps.procs.outputs.config }} --version "${{ github.event.inputs.version }}" --out ../packages.json
 
       - name: Create deployment record
         id: create_deployment
@@ -138,12 +142,14 @@ jobs:
           proc_name="${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}"
           package_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .package_id' packages.json)
           component_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .component_id' packages.json)
+          version=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .version' packages.json)
 
           python scripts/update_deployment_ledger.py \
             --process-name "$proc_name" \
             --component-id "$component_id" \
             --environment dev \
             --package-id "$package_id" \
+            --version "$version" \
             --action ci-deploy --status success \
             --requested-by "${{ github.actor }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

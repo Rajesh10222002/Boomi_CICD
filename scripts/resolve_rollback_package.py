@@ -1,19 +1,19 @@
 """
-Resolve the packageId to roll back to, for a process+environment: by
-default, the package that was actually live in that environment just
-before the current one (skip=1), read from deployments/ledger.csv — the
-deploy history this repo maintains about itself (see
-deployments/README.md), not the Boomi API.
+Resolve the packageId to roll back to, for a process+environment: the
+package that was actually live in that environment just before the
+current one (skip=1), read from deployments/ledger.csv — the deploy
+history this repo maintains about itself (see deployments/README.md).
 
-Falls back to global package-creation order for the component (ignoring
-environment, via the Boomi API) if the ledger doesn't have enough
-successful rows for this process+environment yet — e.g. right after the
-ledger was introduced, before enough promotions have gone through it.
+Deliberately has no fallback to global package-creation order via the
+Boomi API: a rollback can only ever go to something this environment
+actually had deployed before, per the ledger, never an untethered guess.
+If there isn't enough history yet, this fails — pass an explicit
+package_id instead (one that's genuinely been live in this environment;
+check the job summary from a previous promotion, or deployments/ledger.csv
+directly).
 
 Always writes a job-summary table of recent deploys to this environment
-(with real dates and whichever source — ledger or fallback — was used) so
-the choice can be sanity-checked or overridden with an explicit
-package_id.
+(with real dates and versions) so the choice can be sanity-checked.
 
 Usage:
     python scripts/resolve_rollback_package.py --name "My Process" --environment qa [--skip 1]
@@ -22,8 +22,6 @@ Usage:
 import argparse
 import csv
 import os
-
-from boomi_client import BoomiClient
 
 LEDGER_PATH = os.path.join(os.path.dirname(__file__), "..", "deployments", "ledger.csv")
 
@@ -51,16 +49,19 @@ def _ledger_rows(name, environment):
     return deduped
 
 
-def _write_summary(component_id, environment, skip, source, entries):
+def _write_summary(name, environment, skip, rows):
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
     with open(summary_path, "a") as f:
-        f.write(f"## Rollback candidates for componentId `{component_id}` in `{environment}` ({source})\n\n")
-        f.write("| # | packageId | when | notes |\n|---|---|---|---|\n")
-        for i, (package_id, when, notes) in enumerate(entries):
+        f.write(f"## Rollback candidates for '{name}' in `{environment}` (from this repo's deployment ledger)\n\n")
+        f.write("| # | packageId | version | when | notes |\n|---|---|---|---|---|\n")
+        for i, r in enumerate(rows):
             marker = " <- selected" if i == skip else (" (current)" if i == 0 else "")
-            f.write(f"| {i} | `{package_id}` | {when} | {notes}{marker} |\n")
+            f.write(
+                f"| {i} | `{r['package_id']}` | {r.get('version', '')} | {r['timestamp']} | "
+                f"{r.get('comment', '')}{marker} |\n"
+            )
 
 
 def main():
@@ -70,38 +71,19 @@ def main():
     parser.add_argument("--skip", type=int, default=1, help="0=current, 1=one version back (default)")
     args = parser.parse_args()
 
-    client = BoomiClient()
-    component_id = client.find_component_by_name(args.name)
-
-    ledger_rows = _ledger_rows(args.name, args.environment)
-    if len(ledger_rows) > args.skip:
-        target = ledger_rows[args.skip]
-        print(f"package-id={target['package_id']}")
-        _write_summary(
-            component_id,
-            args.environment,
-            args.skip,
-            "this repo's deployment ledger",
-            [(r["package_id"], r["timestamp"], r.get("comment", "")) for r in ledger_rows],
-        )
-        return
-
-    # Fallback: not enough per-environment history yet.
-    packages = client.list_packages(component_id, limit=args.skip + 1)
-    if len(packages) <= args.skip:
+    rows = _ledger_rows(args.name, args.environment)
+    if len(rows) <= args.skip:
         raise SystemExit(
-            f"Only {len(packages)} package(s) exist for '{args.name}' and no ledger history for "
-            f"'{args.environment}' — nothing {args.skip} version(s) back to roll back to."
+            f"Only {len(rows)} distinct successful deploy(s) of '{args.name}' to '{args.environment}' "
+            f"in the ledger — nothing {args.skip} version(s) back to roll back to. Pass an explicit "
+            f"package_id instead, or check deployments/ledger.csv."
         )
-    target = packages[args.skip]
-    print(f"package-id={target['packageId']}")
-    _write_summary(
-        component_id,
-        args.environment,
-        args.skip,
-        "no ledger history yet — fell back to global package order, NOT per-environment",
-        [(p.get("packageId", ""), p.get("createdDate", ""), p.get("notes", "")) for p in packages],
-    )
+
+    target = rows[args.skip]
+    print(f"package-id={target['package_id']}")
+    print(f"component-id={target.get('component_id', '')}")
+    print(f"version={target.get('version', '')}")
+    _write_summary(args.name, args.environment, args.skip, rows)
 
 
 if __name__ == "__main__":

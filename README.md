@@ -21,19 +21,27 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
 .github/workflows/
   ci.yml             Package + deploy-to-Dev + run tests (workflow_dispatch
                       only — a deliberate developer action, not on every
-                      push). Records the Dev deploy into deployments/.
-  cd.yml             Promote a tested package to QA or PD (workflow_dispatch).
-                      Leaving package_id blank promotes whatever the ledger
-                      says is currently deployed one environment down (Dev's
-                      current package for a qa promotion, QA's for a prod
-                      promotion) — not just "the latest built". Also callable
-                      by rollback.yml (workflow_call) so a rollback gets the
-                      same tracking issue / approval gate / deployment record
-                      as a normal promotion.
+                      push). Requires a version label (e.g. v1.1) — becomes
+                      the Boomi package's version and is recorded in the
+                      ledger. Records the Dev deploy into deployments/.
+  cd.yml             Promote to QA or PD (workflow_dispatch) — always takes
+                      whatever the ledger says is currently deployed one
+                      environment down (Dev's current package for a qa
+                      promotion, QA's for a prod promotion); there is no
+                      package_id input on this form, so a process that was
+                      never actually deployed to the environment below
+                      cannot be promoted — the run fails with a clear
+                      message instead of guessing. Also callable by
+                      rollback.yml (workflow_call, the one place an explicit
+                      older package_id is accepted) so a rollback gets the
+                      same tracking issue / approval gate / deployment
+                      record / ledger update as a normal promotion.
   rollback.yml       Redeploy an older package to QA or PD (workflow_dispatch)
                       — leave package_id blank to auto-pick the version that
                       was actually live in that environment before the
-                      current one, from the ledger.
+                      current one, from the ledger (fails if there isn't
+                      enough per-environment history yet, rather than
+                      guessing from Boomi's global package list).
   list-processes.yml  Look up live Boomi processes + their latest package,
                       printed to a job summary. Purely informational —
                       ci.yml/cd.yml resolve process names themselves now.
@@ -98,29 +106,37 @@ resolve automatically server-side (via `BoomiClient.find_component_by_name()`
 / `find_latest_package()`), the same way "List Boomi Processes" looks them up.
 
 1. **Build & deploy to Dev**: Actions tab → **`ci.yml`** → Run workflow →
-   just fill in `process_name` (leave `component_id` blank). Opens a
-   tracking Issue, closes it with the outcome when the run finishes.
+   fill in `process_name` (leave `component_id` blank) and `version` (e.g.
+   `v1.1` — required; this is the version being updated in the Boomi
+   process, becomes the packaged component's version in Boomi, and is
+   recorded in the ledger). Opens a tracking Issue, closes it with the
+   outcome when the run finishes.
 2. **Promote to QA/PD**: Actions tab → **`cd.yml`** → Run workflow →
-   `process_name`, `target_environment` (`qa` or `prod`) — leave `package_id`
-   blank and it promotes whatever the deployment ledger says is *currently
-   deployed one environment down* (Dev's current package for a `qa`
-   promotion, QA's for a `prod` promotion) — a real Dev → QA → PD chain, not
-   just "the most recently built package". Same tracking-Issue pattern;
-   promoting to `prod` additionally waits on the `production` Environment's
-   reviewers.
+   `process_name`, `target_environment` (`qa` or `prod`). There's no
+   `package_id` field here — promotion always takes whatever the
+   deployment ledger says is *currently deployed one environment down*
+   (Dev's current package for a `qa` promotion, QA's for a `prod`
+   promotion), a real Dev → QA → PD chain. A process that hasn't actually
+   been deployed to the environment below yet can't be promoted — the run
+   fails with a clear message rather than guessing. Same tracking-Issue
+   pattern; promoting to `prod` additionally waits on the `production`
+   Environment's reviewers.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment`. Leave `package_id` blank and it
    auto-picks the package that was actually live in that environment just
    before the current one, read from the deployment ledger with real dates
    (job summary always prints the table, so you can confirm the choice);
-   pass an explicit `package_id` instead if the mistake wasn't the newest
-   deploy — use **"List Boomi Packages"** to find it. Goes through the same
-   tracking issue, deployment record, and (for prod) required-reviewer
-   approval as a normal promotion.
-4. **"List Boomi Processes"** and **component_id**/**package_id** inputs
+   fails if there isn't at least two distinct successful deploys of this
+   process to this environment recorded yet, rather than guessing — pass an
+   explicit `package_id` instead (one that's genuinely been live in this
+   environment; check `deployments/ledger.csv` or the job summary from a
+   previous promotion). Goes through the same tracking issue, deployment
+   record, ledger update, and (for prod) required-reviewer approval as a
+   normal promotion.
+4. **"List Boomi Processes"** and **component_id** input on `ci.yml`
    still exist as an explicit override / manual lookup if you ever need
    them (e.g. a component name isn't unique, or you want to double-check
-   what resolved), but day-to-day you shouldn't need either.
+   what resolved), but day-to-day you shouldn't need them.
 5. **Deployment history**: every `ci.yml`/`cd.yml`/`rollback.yml` run also
    posts a native GitHub Deployment record (repo → **Environments** tab),
    so `dev`/`qa`/`production` each show their own history — who, which
@@ -143,6 +159,8 @@ resolve automatically server-side (via `BoomiClient.find_component_by_name()`
   run with an explicit `process_name` or `component_id` bypasses this file
   entirely.
 - Write the real expected-output assertions in `tests/*.json` once the pilot
-  process is chosen.
+  process is chosen. Until then, `run_tests.py` skips (doesn't fail the run
+  on) any test case whose `listener_url` is still the placeholder — so
+  `ci.yml` can still succeed and record a deploy while this is unfinished.
 
 See `CLAUDE.md` for what to hand to Claude Code next.
