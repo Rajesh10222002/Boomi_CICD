@@ -81,12 +81,12 @@ jobs:
         working-directory: scripts
         run: python describe_current.py --name "${{ github.event.inputs.process_name }}" --environment dev >> "$GITHUB_OUTPUT"
 
-      # Best-effort component-XML content diff against the component's
-      # current live definition (nothing's packaged yet at this point) —
-      # see diff_component_versions.py for why this is unverified and
-      # degrades gracefully (xml-diff-available: false, no error) rather
-      # than blocking the build if Boomi's API doesn't behave as assumed.
-      - name: Diff component XML
+      # Structural diff (elements/attributes changed, in plain terms, not
+      # raw XML) against the component's current live definition (nothing's
+      # packaged yet at this point) — see diff_component_versions.py.
+      # Non-fatal: degrades to xml-diff-available=false rather than
+      # blocking the build if it can't produce one for some reason.
+      - name: Diff process structure
         id: xmldiff
         continue-on-error: true
         working-directory: scripts
@@ -99,14 +99,14 @@ jobs:
           python diff_component_versions.py \
             --component-id "${{ steps.procs.outputs.resolved-component-id }}" \
             --from-package-id "${{ steps.current.outputs.current-package-id }}" \
-            --out ../component_diff.patch >> "$GITHUB_OUTPUT"
+            --out ../component_diff.txt >> "$GITHUB_OUTPUT"
 
-      - name: Upload component XML diff
+      - name: Upload process diff
         if: steps.xmldiff.outputs.xml-diff-available == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: component-diff
-          path: component_diff.patch
+          name: process-diff
+          path: component_diff.txt
 
       - name: Create tracking issue
         id: create_issue
@@ -115,7 +115,7 @@ jobs:
         run: |
           diff_line="dev: ${{ steps.current.outputs.current }} -> ${{ github.event.inputs.version }} (pending build)"
           if [ "${{ steps.xmldiff.outputs.xml-diff-available }}" = "true" ]; then
-            xml_diff_note="See this run's job summary and the component-diff artifact."
+            xml_diff_note="See this run's job summary and the process-diff artifact."
           else
             xml_diff_note="Not available for this run (see job summary/logs for why)."
           fi
@@ -126,7 +126,7 @@ jobs:
           "component_id": "${{ steps.procs.outputs.resolved-component-id || github.event.inputs.component_id }}",
           "version": "${{ github.event.inputs.version }}",
           "diff": "$diff_line",
-          "component_xml_diff": "$xml_diff_note",
+          "process_diff": "$xml_diff_note",
           "requested_by": "${{ github.actor }}",
           "comment": "${{ github.event.inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

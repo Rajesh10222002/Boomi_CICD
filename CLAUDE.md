@@ -102,19 +102,22 @@ isn't filled in yet, ask rather than inventing a value:
   summary, ahead of the environment-protection approval gate. Also prints
   `current-package-id`, the raw id `diff_component_versions.py` uses as
   its "before" package.
-- `scripts/diff_component_versions.py` — **unverified against a real
-  Boomi account.** Attempts an actual content diff (not just version
-  labels) between two packages' underlying component XML, via a new
-  `BoomiClient.get_component_xml()`. Depends on two assumptions neither
-  has been confirmed yet: (1) PackagedComponent exposes a
-  `componentVersion` field naming which component revision was packaged;
-  (2) Component GET accepts `{componentId}~{version}` for a specific
-  historical revision. Fails soft either way — prints
-  `xml-diff-available=false` and a reason to stderr, no exception — so
-  `ci.yml`/`cd.yml` wire it in with `continue-on-error: true` and treat it
-  as optional. Run a real promotion and check the "Diff component XML"
-  step's output to confirm or correct these assumptions — see "What's
-  still open" below.
+- `scripts/diff_component_versions.py` — a structural diff (elements
+  added/removed, attribute "X changed from A to B") between two packages'
+  underlying component definitions, via the new
+  `BoomiClient.get_component_xml()` — not a raw XML/line diff, which is
+  unreadable anyway since Boomi returns the XML minified onto one line.
+  Parses both documents with `xml.etree.ElementTree` and walks them in
+  parallel, matching child elements by tag + an identifying attribute
+  (`name`/`id`/`key`) where one exists, positionally within same-tag
+  groups otherwise; falls back to a raw pretty-printed line diff only if
+  a document fails to parse as XML at all. Confirmed against a real
+  account (run 36540110917's later promotions): PackagedComponent does
+  expose `componentVersion`, and Component GET does accept
+  `{componentId}~{version}` for a historical revision — kept failing
+  soft anyway (`xml-diff-available=false` + a reason to stderr, no
+  exception) in case either behaves differently on some other account, so
+  `ci.yml`/`cd.yml` wire it in with `continue-on-error: true`.
 - `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
   only (dropped push/pull_request triggers — packaging/deploying to Dev is
   deliberately a manual action now, not something that fires on every
@@ -244,14 +247,18 @@ isn't filled in yet, ask rather than inventing a value:
    `dev` likely doesn't exist yet as a
    configured Environment (it auto-creates on first reference with no
    protection rules, i.e. ungated, until reviewers are added to it).
-8. **`diff_component_versions.py`'s two Boomi-API assumptions
-   (`componentVersion` on PackagedComponent; `{id}~{version}` for a
-   historical Component GET) are unconfirmed** — genuinely don't know if
-   either holds without seeing a real call's result. Run a promotion and
-   check the "Diff component XML" step's output/logs: if it says
-   `xml-diff-available=false`, the printed reason says which assumption
-   broke, and `get_component_xml()` / `_component_version_for_package()`
-   need fixing to match whatever the real response actually looks like.
+8. ~~`diff_component_versions.py`'s two Boomi-API assumptions are
+   unconfirmed~~ — confirmed against a real account: `componentVersion`
+   on PackagedComponent and `{id}~{version}` on Component GET both work.
+   The first version of this produced a raw XML line diff, which was
+   useless (Boomi returns the whole document as one minified line, so
+   the "diff" was just "one line changed to another line") — replaced
+   with the structural element/attribute diff described above. Not yet
+   seen against a large, real-world process with many shapes — the path
+   breadcrumbs it prints (e.g. `Component 'X' -> object[0] -> process[0]
+   -> shapes[0] -> shape 'Y'`) may turn out noisy for deeply-nested
+   wrapper elements; simplify by eliding childless single-child wrappers
+   from the path if that's confirmed annoying in practice.
 
 ## Ground rules
 

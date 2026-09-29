@@ -105,11 +105,10 @@ native `workflow_dispatch` flow below is the only supported path.)
    before → after diff (version/packageId) in the issue body and that
    run's job summary, so the reviewer isn't approving blind — check those
    before clicking Approve in the "Review deployments" prompt GitHub shows
-   on the run. The job summary also attempts an actual component-XML
-   content diff (not just version labels), uploaded as a `component-diff`
-   artifact when it succeeds — this part is new and unverified against a
-   real Boomi account, so it may currently just say "not available" until
-   the API assumptions behind it are confirmed (see CLAUDE.md item #8).
+   on the run. The job summary also shows a **process diff** — actual
+   structural changes (shape/element added or removed, an attribute
+   changed from X to Y), not raw XML — uploaded as a `process-diff`
+   artifact when it succeeds.
 4. **Who can trigger runs** — controlled entirely by GitHub repo access, not
    by anything in this repo: add exactly the people who should be able to
    dispatch `ci.yml`/`cd.yml`/`rollback.yml` as collaborators (Settings →
