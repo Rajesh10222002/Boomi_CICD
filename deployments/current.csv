@@ -1,2 +1,3 @@
 process_name,component_id,environment,package_id,version,deployed_at,deployed_by,run_url
 Boomi Basics Demo,e2d693f8-0186-4e43-96da-578b96ae0ecb,dev,b9182c67-569e-4021-bc70-b1f2e4701bf6,v1.1,2026-09-29T08:32:32+00:00,Rajesh10222002,https://github.com/Rajesh10222002/Boomi_CICD/actions/runs/36543339370
+Boomi Basics Demo Components,777b6fab-3769-4409-9fb5-f13a6c3d296f,dev,f24b2e93-a4b2-4a0e-9426-30a3b3c99013,v1.2,2026-09-29T09:38:53+00:00,Rajesh10222002,https://github.com/Rajesh10222002/Boomi_CICD/actions/runs/36550490247
