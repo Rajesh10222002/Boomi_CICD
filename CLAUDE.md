@@ -250,15 +250,27 @@ isn't filled in yet, ask rather than inventing a value:
 8. ~~`diff_component_versions.py`'s two Boomi-API assumptions are
    unconfirmed~~ — confirmed against a real account: `componentVersion`
    on PackagedComponent and `{id}~{version}` on Component GET both work.
-   The first version of this produced a raw XML line diff, which was
-   useless (Boomi returns the whole document as one minified line, so
-   the "diff" was just "one line changed to another line") — replaced
-   with the structural element/attribute diff described above. Not yet
-   seen against a large, real-world process with many shapes — the path
-   breadcrumbs it prints (e.g. `Component 'X' -> object[0] -> process[0]
-   -> shapes[0] -> shape 'Y'`) may turn out noisy for deeply-nested
-   wrapper elements; simplify by eliding childless single-child wrappers
-   from the path if that's confirmed annoying in practice.
+   Went through two more rounds against real diff output:
+   - The first version produced a raw XML line diff, useless because
+     Boomi returns the whole document as one minified line ("one line
+     changed to another line") — replaced with the structural
+     element/attribute diff described above.
+   - That still showed `object[0] -> process[0] -> shapes[0]` noise
+     (meaningless indices on wrapper elements there's only ever one of)
+     and gave zero context on added/removed elements (e.g. "shape
+     'shape8': added" with no attributes) — a real run showed a shape
+     removed + a same-typed shape added + a dragpoint's `toShape`
+     retargeted, which reads exactly like Boomi internally renumbering
+     an unchanged shape rather than a real content change, but there was
+     no way to tell without seeing the shapes' own attributes. Fixed:
+     indices are now only shown when a tag genuinely has multiple
+     siblings, and added/removed elements print their full attribute set
+     (`_attrs_str()`) so a same-type/same-position add+remove pair is
+     visibly identifiable as a likely renumbering.
+   Still not confirmed: whether dumping *all* attributes on add/remove
+   turns out too noisy for a shape with many layout-only attributes
+   (x/y-style canvas coordinates) once seen on a bigger real process —
+   no evidence either way yet, so nothing's filtered out.
 
 ## Ground rules
 

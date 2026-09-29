@@ -81,6 +81,13 @@ def _child_key(elem):
     return None
 
 
+def _attrs_str(elem):
+    """All of an element's attributes, compact and readable, for context on what an added/removed node actually was."""
+    if not elem.attrib:
+        return ""
+    return ", ".join(f"{k}='{v}'" for k, v in elem.attrib.items())
+
+
 def _diff_elements(from_el, to_el, path, changes):
     from_attrs = from_el.attrib if from_el is not None else {}
     to_attrs = to_el.attrib if to_el is not None else {}
@@ -121,10 +128,12 @@ def _diff_elements(from_el, to_el, path, changes):
 
     for k, c in from_named.items():
         if k not in to_named:
-            changes.append(f"{path} -> {_identify(c)}: removed")
+            attrs = _attrs_str(c)
+            changes.append(f"{path} -> {_identify(c)}: removed" + (f" ({attrs})" if attrs else ""))
     for k, c in to_named.items():
         if k not in from_named:
-            changes.append(f"{path} -> {_identify(c)}: added")
+            attrs = _attrs_str(c)
+            changes.append(f"{path} -> {_identify(c)}: added" + (f" ({attrs})" if attrs else ""))
     for k in from_named:
         if k in to_named:
             _diff_elements(from_named[k], to_named[k], f"{path} -> {_identify(to_named[k])}", changes)
@@ -138,8 +147,13 @@ def _diff_elements(from_el, to_el, path, changes):
         froms, tos = from_by_tag.get(tag, []), to_by_tag.get(tag, [])
         if len(froms) != len(tos):
             changes.append(f"{path}: number of <{tag}> elements changed from {len(froms)} to {len(tos)}")
+        # Only disambiguate with an index when there's genuinely more than
+        # one sibling of this tag — "process[0]" when there's only ever
+        # one <process> is noise, not information.
+        needs_index = len(froms) > 1 or len(tos) > 1
         for i in range(min(len(froms), len(tos))):
-            _diff_elements(froms[i], tos[i], f"{path} -> {tag}[{i}]", changes)
+            child_path = f"{path} -> {tag}[{i}]" if needs_index else f"{path} -> {tag}"
+            _diff_elements(froms[i], tos[i], child_path, changes)
 
 
 def _structural_diff(from_xml, to_xml):
