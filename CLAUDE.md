@@ -56,7 +56,11 @@ isn't filled in yet, ask rather than inventing a value:
   for a quick look, or when a name is ambiguous and an explicit
   componentId is needed.
 - `scripts/list_packages.py` — every package (not just latest) for one
-  process, for picking an older packageId as a rollback target.
+  process, for picking an older packageId as a rollback target. Each row
+  is annotated with which environment(s) `deployments/ledger.csv` recorded
+  it as deployed to (and whether it's still `current`, from
+  `deployments/current.csv`) — a package Boomi knows about but this repo
+  never deployed shows no environment.
 - `scripts/write_ad_hoc_config.py` — writes a one-process components.json-
   shaped config for an ad-hoc `ci.yml` run; resolves `component_id` from
   `process_name` via `find_component_by_name()` if not given explicitly.

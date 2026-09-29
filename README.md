@@ -46,7 +46,10 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       printed to a job summary. Purely informational —
                       ci.yml/cd.yml resolve process names themselves now.
   list-packages.yml  Every package (not just latest) for one process, for
-                      picking an older packageId as a rollback target.
+                      picking an older packageId as a rollback target —
+                      annotated with which environment(s) it's actually
+                      been deployed to (and whether it's still current
+                      there), from the deployment ledger.
   debug-secrets.yml  Prints SHA256 hashes of the Boomi secrets (never values).
 ```
 
