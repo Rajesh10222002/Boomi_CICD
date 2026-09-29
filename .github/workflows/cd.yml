@@ -6,9 +6,11 @@ on:
       process_name:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
+        type: string
       package_id:
-        description: "Boomi packaged component id to deploy — optional, resolves to process_name's latest package if left blank. For a rollback, use 'List Boomi Packages' to find an older one."
+        description: "Boomi packaged component id to deploy — optional, resolves to process_name's latest package if left blank. For a rollback, use the 'Rollback' workflow instead, or 'List Boomi Packages' to find an older one to pass here."
         required: false
+        type: string
       target_environment:
         description: "Environment to promote into"
         required: true
@@ -19,17 +21,49 @@ on:
       comment:
         description: "Optional note about this promotion (shown in the tracking issue)"
         required: false
+        type: string
+
+  # Lets rollback.yml redeploy an older package through this same workflow,
+  # so a rollback gets the identical tracking-issue / approval-gate /
+  # deployment-record behavior as a normal promotion — no separate,
+  # weaker path for undoing a mistake.
+  workflow_call:
+    inputs:
+      process_name:
+        required: true
+        type: string
+      package_id:
+        required: false
+        type: string
+      target_environment:
+        required: true
+        type: string
+      comment:
+        required: false
+        type: string
+
+concurrency:
+  # One promotion (or rollback) at a time per process+environment, so two
+  # dispatches can't deploy to the same target concurrently.
+  group: cd-${{ inputs.process_name }}-${{ inputs.target_environment }}
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write # the "deploy" job commits the deployment-ledger update
   issues: write
+  deployments: write
 
 jobs:
-  deploy:
+  # Resolves the package to deploy and opens the tracking issue *before*
+  # the "deploy" job's environment gate — so a required reviewer approving
+  # a prod promotion sees this issue already linked to the run (who, what,
+  # why), not just the raw workflow inputs GitHub shows natively.
+  prepare:
     runs-on: ubuntu-latest
-    # The "prod" choice maps to the GitHub Environment named "production" so
-    # that Environment's required reviewers (if configured) gate this job.
-    environment: ${{ github.event.inputs.target_environment == 'prod' && 'production' || github.event.inputs.target_environment }}
+    outputs:
+      package-id: ${{ steps.resolve.outputs.package-id }}
+      component-id: ${{ steps.resolve.outputs.component-id }}
+      issue-number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +74,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Promoting means "take whatever's currently deployed in the
+      # environment below this one" (Dev -> QA, QA -> PD), read from this
+      # repo's own deployment ledger — not "the most recently built
+      # package", which could be a version that was built but never
+      # actually promoted. See deployments/README.md.
       - name: Resolve package_id if needed
         id: resolve
         working-directory: scripts
@@ -49,27 +88,27 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          if [ -n "${{ github.event.inputs.package_id }}" ]; then
-            echo "package-id=${{ github.event.inputs.package_id }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.package_id }}" ]; then
+            echo "package-id=${{ inputs.package_id }}" >> "$GITHUB_OUTPUT"
           else
-            python resolve_latest_package.py --name "${{ github.event.inputs.process_name }}" >> "$GITHUB_OUTPUT"
+            source_env="dev"
+            if [ "${{ inputs.target_environment }}" = "prod" ]; then source_env="qa"; fi
+            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" >> "$GITHUB_OUTPUT"
           fi
 
-      # Runs after the step above so the issue shows the resolved
-      # package_id even when it wasn't given explicitly.
       - name: Create tracking issue
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          issue_title="Promote ${{ github.event.inputs.process_name }} to ${{ github.event.inputs.target_environment }}"
+          issue_title="Promote ${{ inputs.process_name }} to ${{ inputs.target_environment }}"
           issue_body=$(cat <<EOF
           {
-          "process_name": "${{ github.event.inputs.process_name }}",
+          "process_name": "${{ inputs.process_name }}",
           "package_id": "${{ steps.resolve.outputs.package-id }}",
-          "target_environment": "${{ github.event.inputs.target_environment }}",
+          "target_environment": "${{ inputs.target_environment }}",
           "requested_by": "${{ github.actor }}",
-          "comment": "${{ github.event.inputs.comment }}",
+          "comment": "${{ inputs.comment }}",
           "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF
@@ -77,12 +116,47 @@ jobs:
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "${{ github.event.inputs.target_environment }}" '{title: $title, body: $body, labels: ["promote", $env]}')" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "${{ inputs.target_environment }}" '{title: $title, body: $body, labels: ["promote", $env]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # The "prod" choice maps to the GitHub Environment named "production" so
+    # that Environment's required reviewers (if configured) gate this job.
+    # The "prepare" job above already opened the tracking issue, so a
+    # reviewer approving here sees it linked rather than approving blind.
+    environment: ${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create deployment record
+        id: create_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          env_name="${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment }}"
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg ref "${{ github.sha }}" --arg env "$env_name" \
+                  --arg desc "Promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
+                  '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [], description: $desc}')" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments")
+          deployment_id=$(echo "$response" | jq -r '.id')
+          echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
+
       - name: Deploy package to target environment
+        id: deploy
         working-directory: scripts
         env:
           BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
@@ -91,23 +165,79 @@ jobs:
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
           python deploy_component.py \
-            --package-id "${{ steps.resolve.outputs.package-id }}" \
-            --env "${{ github.event.inputs.target_environment }}" \
-            --config "../environments/${{ github.event.inputs.target_environment == 'prod' && 'prod' || github.event.inputs.target_environment }}.json"
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --env "${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}" \
+            --config "../environments/${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}.json"
 
-      - name: Close tracking issue
-        if: always() && steps.create_issue.outputs.issue-number != ''
+      # Records this promotion into deployments/{ledger,current}.csv and
+      # pushes it back to the repo with the run's own GITHUB_TOKEN — GitHub
+      # doesn't re-trigger push-triggered workflows for GITHUB_TOKEN
+      # commits, so this can't loop (not that cd.yml is push-triggered
+      # anyway). See deployments/README.md.
+      - name: Record deployment in ledger
+        if: steps.deploy.outcome == 'success'
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          env_name="${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}"
+          python scripts/update_deployment_ledger.py \
+            --process-name "${{ inputs.process_name }}" \
+            --component-id "${{ needs.prepare.outputs.component-id }}" \
+            --environment "$env_name" \
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --action promote --status success \
+            --requested-by "${{ github.actor }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --comment "${{ inputs.comment }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployments/
+          if git diff --cached --quiet; then
+            echo "No ledger changes to commit."
+          else
+            git commit -m "Record promotion: ${{ inputs.process_name }} -> $env_name (${{ needs.prepare.outputs.package-id }})"
+            pushed=false
+            for attempt in 1 2 3; do
+              git fetch origin "${{ github.ref_name }}"
+              if git rebase "origin/${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                pushed=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$pushed" != true ]; then
+              echo "::warning::Failed to push deployment-ledger update after 3 attempts — deployments/*.csv is now out of date until this is reconciled manually."
+            fi
+          fi
+
+      - name: Finalize deployment status and tracking issue
+        if: always() && needs.prepare.outputs.issue-number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           outcome="${{ job.status }}"
+          state="success"
+          if [ "$outcome" != "success" ]; then state="failure"; fi
+
+          if [ -n "${{ steps.create_deployment.outputs.deployment-id }}" ]; then
+            curl -s -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -d "$(jq -n --arg state "$state" '{state: $state, description: ("Run finished with status: " + $state)}')" \
+              "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
+          fi
+
           curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}/comments"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}/comments"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ steps.create_issue.outputs.issue-number }}"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"

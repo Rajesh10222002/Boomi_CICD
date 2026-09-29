@@ -23,9 +23,11 @@ they arrive as GitHub Actions secrets, added directly in that UI).
 
 The human owner is still confirming these. If a task below needs one and it
 isn't filled in yet, ask rather than inventing a value:
-- Which Boomi process is the actual pilot for the **push-triggered** `ci.yml`
-  pipeline (currently a placeholder id in `components/components.json`). Not
-  needed for a manual `workflow_dispatch` run — `process_name` alone resolves
+- Which Boomi process is the actual pilot for the **components.json-driven**
+  `ci.yml` run (leave both `process_name`/`component_id` blank to use it —
+  currently a placeholder id in `components/components.json`, so that path
+  fails by design until this is filled in). Not needed for the normal
+  per-process `workflow_dispatch` run — `process_name` alone resolves
   componentId/packageId live via `BoomiClient.find_component_by_name()` /
   `find_latest_package()`.
 - The atom IDs for Dev, QA, PD (still placeholders in `environments/*.json`
@@ -60,18 +62,53 @@ isn't filled in yet, ask rather than inventing a value:
   `process_name` via `find_component_by_name()` if not given explicitly.
   Prints `resolved-component-id=<id>` on stdout (diagnostics go to stderr)
   so a workflow step can capture it straight into `$GITHUB_OUTPUT`.
-- `scripts/resolve_latest_package.py` — same idea for `cd.yml`: resolves
-  `process_name` to its latest packageId, printing `package-id=<id>`.
-- `.github/workflows/ci.yml` — on push to `main`: package → deploy to Dev →
-  run tests, using `components/components.json`. `workflow_dispatch` with
-  just `process_name` (or a `process_name` + explicit `component_id`) runs
-  one ad-hoc process instead, and (only for `workflow_dispatch`)
-  opens/closes a tracking GitHub Issue.
+- `scripts/update_deployment_ledger.py` — appends to `deployments/ledger.csv`
+  and upserts `deployments/current.csv` after a successful deploy. Pure
+  file I/O (no Boomi/GitHub calls) — the calling workflow step does the
+  `git commit`/`push`. See `deployments/README.md`.
+- `scripts/resolve_current_package.py` — for `cd.yml`: resolves
+  `process_name` + `--environment` to the packageId `deployments/current.csv`
+  says is live there right now, printing `package-id=<id>` and
+  `component-id=<id>`. Falls back to Boomi's "latest ever packaged" lookup
+  (the old `resolve_latest_package.py`, since removed — nothing else called
+  it) if there's no ledger row yet.
+- `scripts/resolve_rollback_package.py` — for `rollback.yml`: resolves
+  `process_name` + `--environment` to the packageId that was actually live
+  in that environment just before the current one (`--skip N` for further
+  back), read from `deployments/ledger.csv` with real timestamps. Falls
+  back to global package-creation order via the Boomi API (ignoring
+  environment) if the ledger doesn't have enough per-environment rows yet.
+  Always writes a job-summary table either way.
+- `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
+  only (dropped push/pull_request triggers — packaging/deploying to Dev is
+  deliberately a manual action now, not something that fires on every
+  commit; see "What's still open" #5). `process_name` (or a `process_name` +
+  explicit `component_id`) runs one ad-hoc process; leaving both blank
+  packages/deploys everything in `components/components.json` instead.
+  Opens/closes a tracking GitHub Issue on every run, posts a native GitHub
+  Deployment record (`dev`), records the deploy into
+  `deployments/{ledger,current}.csv` and pushes that commit back, and has
+  a `concurrency` group keyed on `process_name` (push/PR runs share one
+  bucket since they all target `components.json`).
 - `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name`,
-  optional `package_id` (resolves to the latest if blank), and
-  `target_environment` (qa|prod); deploys that package to the chosen
-  environment (`prod` maps to the `production` GitHub Environment for its
-  reviewer gate) and opens/closes a tracking Issue.
+  optional `package_id` (blank = whatever the ledger says is currently
+  deployed one environment down — Dev's for a `qa` promotion, QA's for
+  `prod`), and `target_environment` (qa|prod); deploys that package to the
+  chosen environment (`prod` maps to the `production` GitHub Environment
+  for its reviewer gate), records it into the ledger, and opens/closes a
+  tracking Issue. Split into a `prepare` job (resolves the package, opens
+  the issue) and a `deploy` job (the environment-gated one, posts a
+  GitHub Deployment record, records the ledger, closes the issue) so a
+  reviewer approving a prod promotion sees the linked issue, not just raw
+  inputs — see "What's still open" #2 below, now closed. Also declares
+  `workflow_call` inputs so `rollback.yml` can invoke it directly, reusing
+  the same issue/approval/deployment-record/ledger path for a rollback.
+  Has a `concurrency` group keyed on process+environment.
+- `.github/workflows/rollback.yml` — `workflow_dispatch` with
+  `process_name`, `target_environment` (qa|prod), optional `package_id`
+  (auto-resolves via `scripts/resolve_rollback_package.py` to the package
+  actually live in that environment just before the current one, from the
+  ledger, if left blank). Delegates the actual deploy to `cd.yml`.
 - `.github/workflows/list-processes.yml` / `list-packages.yml` — one-off
   `workflow_dispatch` lookups (components+latest-package; full package
   history for one process), printed to the Actions job summary.
@@ -86,20 +123,39 @@ isn't filled in yet, ask rather than inventing a value:
    matches how the actual pilot process is triggered (it may be a different
    listener type) once that process is chosen, and fill in the real
    assertion logic (`_check_expectation()` is a stub).
-2. **The tracking issue is created inside the gated job**, so for `prod`
-   promotions it only gets created *after* the `production` Environment's
-   required reviewers approve — an approver reviewing the pending deployment
-   sees the workflow's raw inputs (GitHub shows those natively) but not yet
-   a linked Issue. Splitting into a separate `wait_for_approval` job ahead of
-   a `manual-approval` Environment (like `qco-incorta-cicd`'s `rollback.yml`
-   does) would let the issue exist before approval; not done yet since the
-   existing `production` Environment gate already covers the actual approval
-   requirement.
+2. ~~The tracking issue is created inside the gated job~~ — fixed: `cd.yml`
+   now splits into `prepare` (resolves the package, opens the issue —
+   ungated) and `deploy` (the environment-gated job, posts a Deployment
+   record, closes the issue). A reviewer approving a prod promotion now
+   sees the linked issue already open. Not yet confirmed against a live
+   run: whether GitHub's required-reviewer prompt actually appears for
+   `deploy` when the run originates from `rollback.yml`'s `workflow_call`
+   into `cd.yml` rather than a direct `workflow_dispatch` — reusable
+   workflows are documented to respect environment protection rules, but
+   this hasn't been exercised against this repo's actual `production`
+   Environment yet.
 3. **Name resolution assumes unique process names.** `find_component_by_name()`
    raises (failing the run) if two live components share a name and type —
    the fix in that case is passing an explicit `component_id`/`package_id`
    (found via `list-processes.yml`/`list-packages.yml`), not silently
    guessing which one was meant.
+4. **`ci.yml`/`cd.yml` now push commits back to the repo** (the deployment
+   ledger update in `deployments/`), using `permissions: contents: write`
+   and the run's own `GITHUB_TOKEN` — deliberately not a PAT, so GitHub's
+   built-in "don't re-trigger push-triggered workflows for GITHUB_TOKEN
+   commits" safeguard applies and `ci.yml` (push-triggered) can't loop on
+   itself. Not yet exercised against a real PR from a fork: GitHub forces
+   a read-only `GITHUB_TOKEN` for `pull_request` runs from forks regardless
+   of the `permissions:` block, so the ledger push would fail there — it's
+   handled gracefully (a `::warning::` annotation, not a failed run), just
+   confirm that's still the desired behavior once real PRs are in the mix.
+5. **`ci.yml` dropped its `push`/`pull_request` triggers** (workflow_dispatch
+   only now). Every automatic run was failing anyway — `components.json`'s
+   pilot process_id is still the placeholder from context item #1 above —
+   and packaging/deploying to Dev on every commit wasn't wanted even once
+   that's fixed; it's meant to be a deliberate developer action. If a
+   push-triggered path is wanted again later, it needs to be re-added
+   on purpose, not assumed.
 
 ## Ground rules
 

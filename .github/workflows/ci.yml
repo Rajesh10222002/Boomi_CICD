@@ -1,25 +1,39 @@
-name: CI - Package, Deploy to Dev, Test
+name: Build & Deploy to Dev
+
+# Deliberately workflow_dispatch-only — packaging and deploying to Dev is
+# something a developer chooses to do, not something that fires on every
+# push/PR. (It used to also trigger on push/pull_request to main; that
+# was dropped because components/components.json's pilot process_id is
+# still a placeholder, so every one of those automatic runs failed at the
+# "Package component(s)" step by design — see CLAUDE.md's "Context you
+# don't have yet" for the still-open question of what the real pilot
+# process is. Once that's filled in, this can still be run manually
+# with process_name/component_id left blank to use components.json.)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       process_name:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: false
       component_id:
-        description: "Boomi componentId — optional, resolved automatically from process_name if left blank. Leave both blank to run the push-triggered components.json pipeline instead."
+        description: "Boomi componentId — optional, resolved automatically from process_name if left blank. Leave both blank to package/deploy everything in components.json instead."
         required: false
       comment:
         description: "Optional note about this run (shown in the tracking issue)"
         required: false
 
+concurrency:
+  # One run at a time per process_name (or one shared bucket for
+  # components.json-driven runs), so two dispatches can't deploy to Dev
+  # for the same process concurrently.
+  group: ci-${{ github.event.inputs.process_name || 'components-json' }}
+  cancel-in-progress: false
+
 permissions:
-  contents: read
+  contents: write # this job commits the deployment-ledger update
   issues: write
+  deployments: write
 
 jobs:
   package-and-test:
@@ -53,14 +67,10 @@ jobs:
             echo "config=../components/components.json" >> "$GITHUB_OUTPUT"
           fi
 
-      # Manual (workflow_dispatch) runs get a tracking issue as an audit
-      # record of who requested what and why — push/pull_request runs don't,
-      # to avoid opening an issue on every routine commit. Runs after the
-      # step above so the issue shows the resolved componentId even when
-      # only a process_name was given.
+      # Runs after the step above so the issue shows the resolved
+      # componentId even when only a process_name was given.
       - name: Create tracking issue
         id: create_issue
-        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -92,7 +102,21 @@ jobs:
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python package_component.py --config ${{ steps.procs.outputs.config }} --out ../packages.json
 
+      - name: Create deployment record
+        id: create_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg ref "${{ github.sha }}" '{ref: $ref, environment: "dev", auto_merge: false, required_contexts: [], description: "CI deploy to Dev"}')" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments")
+          deployment_id=$(echo "$response" | jq -r '.id')
+          echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
+
       - name: Deploy package(s) to Dev
+        id: deploy
         working-directory: scripts
         env:
           BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
@@ -102,6 +126,48 @@ jobs:
         run: |
           python deploy_component.py --process-name "${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}" \
             --packages ../packages.json --env dev --config ../environments/dev.json
+
+      # Records this Dev deploy into deployments/{ledger,current}.csv and
+      # pushes it back. See deployments/README.md. Two dispatches for
+      # different processes could still race this push (the concurrency
+      # group above only serializes the *same* process_name), hence the
+      # rebase-and-retry loop.
+      - name: Record deployment in ledger
+        if: steps.deploy.outcome == 'success'
+        run: |
+          proc_name="${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}"
+          package_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .package_id' packages.json)
+          component_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .component_id' packages.json)
+
+          python scripts/update_deployment_ledger.py \
+            --process-name "$proc_name" \
+            --component-id "$component_id" \
+            --environment dev \
+            --package-id "$package_id" \
+            --action ci-deploy --status success \
+            --requested-by "${{ github.actor }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployments/
+          if git diff --cached --quiet; then
+            echo "No ledger changes to commit."
+          else
+            git commit -m "Record Dev deployment: $proc_name -> $package_id"
+            pushed=false
+            for attempt in 1 2 3; do
+              git fetch origin "${{ github.ref_name }}"
+              if git rebase "origin/${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                pushed=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$pushed" != true ]; then
+              echo "::warning::Failed to push deployment-ledger update after 3 attempts — deployments/*.csv is now out of date until this is reconciled manually."
+            fi
+          fi
 
       - name: Run test cases against Dev
         working-directory: scripts
@@ -118,8 +184,21 @@ jobs:
           name: packages
           path: packages.json
 
+      - name: Finalize deployment status
+        if: always() && steps.create_deployment.outputs.deployment-id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          state="success"
+          if [ "${{ job.status }}" != "success" ]; then state="failure"; fi
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg state "$state" '{state: $state, description: ("CI run finished with status: " + $state)}')" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
+
       - name: Close tracking issue
-        if: always() && github.event_name == 'workflow_dispatch' && steps.create_issue.outputs.issue-number != ''
+        if: always() && steps.create_issue.outputs.issue-number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
