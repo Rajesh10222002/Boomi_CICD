@@ -255,6 +255,23 @@ class BoomiClient:
         packages = self.list_packages(component_id, limit=1)
         return packages[0]["packageId"] if packages else None
 
+    def get_component_xml(self, component_id, version=None):
+        """
+        Fetch the raw XML definition of a component: the current (latest)
+        one by default, or a specific historical revision if `version` is
+        given. The Component object returns XML, not JSON, so this
+        overrides the session's default JSON Accept header for just this
+        call.
+
+        UNVERIFIED against a real account: version-pinned retrieval uses
+        "{componentId}~{version}" as the path segment, based on Boomi's
+        documented pattern for addressing a specific component revision —
+        if a real call 404s or errors, that format may need correcting.
+        """
+        path = f"{component_id}~{version}" if version is not None else component_id
+        resp = self._request("GET", self._url("Component", path), headers={"Accept": "application/xml"})
+        return resp.text
+
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):
         """Poll an execution until it leaves an in-progress state or timeout_s elapses."""
         deadline = time.time() + timeout_s

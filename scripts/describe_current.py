@@ -5,8 +5,9 @@ deployments/current.csv — for showing a before/after diff to whoever's
 approving a deploy, not for any control-flow decision (see
 resolve_current_package.py for that).
 
-Prints `current=<description>` (nothing else) so a workflow step can
-capture it into $GITHUB_OUTPUT.
+Prints `current=<description>` and `current-package-id=<id or empty>` so
+a workflow step can capture both into $GITHUB_OUTPUT — the latter is what
+diff_component_versions.py uses as its "before" package.
 
 Usage:
     python scripts/describe_current.py --name "My Process" --environment qa
@@ -34,9 +35,11 @@ def main():
                         f"current={version} — package {row['package_id']}, "
                         f"deployed {row['deployed_at']} by {row['deployed_by']}"
                     )
+                    print(f"current-package-id={row['package_id']}")
                     return
 
     print("current=(nothing deployed yet)")
+    print("current-package-id=")
 
 
 if __name__ == "__main__":

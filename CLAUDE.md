@@ -99,7 +99,22 @@ isn't filled in yet, ask rather than inventing a value:
   says is live for a process+environment right now, or
   "(nothing deployed yet)". Used by `ci.yml`/`cd.yml`'s `prepare` step to
   build the before -> after diff shown in the tracking issue and job
-  summary, ahead of the environment-protection approval gate.
+  summary, ahead of the environment-protection approval gate. Also prints
+  `current-package-id`, the raw id `diff_component_versions.py` uses as
+  its "before" package.
+- `scripts/diff_component_versions.py` — **unverified against a real
+  Boomi account.** Attempts an actual content diff (not just version
+  labels) between two packages' underlying component XML, via a new
+  `BoomiClient.get_component_xml()`. Depends on two assumptions neither
+  has been confirmed yet: (1) PackagedComponent exposes a
+  `componentVersion` field naming which component revision was packaged;
+  (2) Component GET accepts `{componentId}~{version}` for a specific
+  historical revision. Fails soft either way — prints
+  `xml-diff-available=false` and a reason to stderr, no exception — so
+  `ci.yml`/`cd.yml` wire it in with `continue-on-error: true` and treat it
+  as optional. Run a real promotion and check the "Diff component XML"
+  step's output to confirm or correct these assumptions — see "What's
+  still open" below.
 - `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
   only (dropped push/pull_request triggers — packaging/deploying to Dev is
   deliberately a manual action now, not something that fires on every
@@ -229,6 +244,14 @@ isn't filled in yet, ask rather than inventing a value:
    `dev` likely doesn't exist yet as a
    configured Environment (it auto-creates on first reference with no
    protection rules, i.e. ungated, until reviewers are added to it).
+8. **`diff_component_versions.py`'s two Boomi-API assumptions
+   (`componentVersion` on PackagedComponent; `{id}~{version}` for a
+   historical Component GET) are unconfirmed** — genuinely don't know if
+   either holds without seeing a real call's result. Run a promotion and
+   check the "Diff component XML" step's output/logs: if it says
+   `xml-diff-available=false`, the printed reason says which assumption
+   broke, and `get_component_xml()` / `_component_version_for_package()`
+   need fixing to match whatever the real response actually looks like.
 
 ## Ground rules
 
