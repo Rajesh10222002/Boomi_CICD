@@ -36,9 +36,10 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       older package_id is accepted) so a rollback gets the
                       same tracking issue / approval gate / deployment
                       record / ledger update as a normal promotion.
-  rollback.yml       Redeploy an older package to QA or PD (workflow_dispatch)
-                      — leave package_id blank to auto-pick the version that
-                      was actually live in that environment before the
+  rollback.yml       Redeploy an older package to Dev, QA, or PD
+                      (workflow_dispatch) — leave package_id blank to
+                      auto-pick the version that was actually live in
+                      that environment before the
                       current one, from the ledger (fails if there isn't
                       enough per-environment history yet, rather than
                       guessing from Boomi's global package list).
@@ -129,7 +130,8 @@ deployment ledger, not a raw Boomi lookup.
    Same tracking-Issue pattern; promoting to `prod` additionally waits on
    the `production` Environment's reviewers.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
-   `process_name`, `target_environment`. Leave `package_id` blank and it
+   `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
+   `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it
    auto-picks the package that was actually live in that environment just
    before the current one, read from the deployment ledger with real dates
    (job summary always prints the table, so you can confirm the choice);

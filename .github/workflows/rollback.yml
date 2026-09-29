@@ -1,8 +1,8 @@
 name: Rollback - Redeploy Previous Package
 
-# Undo a bad promotion by redeploying an older package to qa/prod, as its
-# own clearly-labeled Actions entry instead of "re-run cd.yml and remember
-# to fill in an old package_id yourself".
+# Undo a bad deploy by redeploying an older package to dev/qa/prod, as its
+# own clearly-labeled Actions entry instead of "re-run ci.yml/cd.yml and
+# remember to fill in an old package_id yourself".
 #
 # Leave package_id blank to auto-pick the package that was actually live
 # in target_environment just before the current one, read from this
@@ -17,7 +17,10 @@ name: Rollback - Redeploy Previous Package
 # rollback goes through the exact same tracking issue, deployment record,
 # ledger update, and (for prod) required-reviewer approval gate as a
 # normal promotion — nothing gets to skip the approval gate just because
-# it's a rollback.
+# it's a rollback. cd.yml's own environment mapping (only "prod" maps to
+# the "production" GitHub Environment, everything else is used as-is)
+# already handles "dev" the same way it handles "qa" — no special-casing
+# needed here for it to work.
 
 on:
   workflow_dispatch:
@@ -31,6 +34,7 @@ on:
         required: true
         type: choice
         options:
+          - dev
           - qa
           - prod
       package_id:

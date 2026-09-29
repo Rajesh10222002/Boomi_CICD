@@ -124,11 +124,17 @@ isn't filled in yet, ask rather than inventing a value:
   issue/approval/deployment-record/ledger machinery for a rollback. Has a
   `concurrency` group keyed on process+environment.
 - `.github/workflows/rollback.yml` — `workflow_dispatch` with
-  `process_name`, `target_environment` (qa|prod), optional `package_id`
-  (auto-resolves via `scripts/resolve_rollback_package.py` to the package
-  actually live in that environment just before the current one, from the
-  ledger, if left blank — fails if there isn't enough per-environment
-  history). Delegates the actual deploy to `cd.yml`'s `workflow_call`.
+  `process_name`, `target_environment` (**dev|qa|prod** — includes dev,
+  unlike `cd.yml`'s own form, since rolling back means redeploying
+  somewhere that's already had a deploy, which dev qualifies for just as
+  much as qa/prod), optional `package_id` (auto-resolves via
+  `scripts/resolve_rollback_package.py` to the package actually live in
+  that environment just before the current one, from the ledger, if left
+  blank — fails if there isn't enough per-environment history). Delegates
+  the actual deploy to `cd.yml`'s `workflow_call`, whose environment
+  mapping (only `prod` maps to the `production` GitHub Environment, else
+  used as-is) already handles `dev` symmetrically with `qa` — no
+  special-casing was needed to add it.
 - `.github/workflows/list-processes.yml` / `list-packages.yml` — one-off
   `workflow_dispatch` lookups (components+latest-package; full package
   history for one process), printed to the Actions job summary.
