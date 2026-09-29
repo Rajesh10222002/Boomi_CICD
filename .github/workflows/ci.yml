@@ -7,30 +7,31 @@ name: Build & Deploy to Dev
 # still a placeholder, so every one of those automatic runs failed at the
 # "Package component(s)" step by design — see CLAUDE.md's "Context you
 # don't have yet" for the still-open question of what the real pilot
-# process is. Once that's filled in, this can still be run manually
-# with process_name/component_id left blank to use components.json.)
+# process is. It also used to support leaving process_name/component_id
+# both blank to bulk-package everything in components.json — dropped in
+# favor of always requiring an explicit process_name; this workflow no
+# longer reads components.json at all.)
 
 on:
   workflow_dispatch:
     inputs:
+      process_name:
+        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
+        required: true
       version:
         description: "Version label for this package, e.g. v1.1 — the version being updated in the Boomi process. Recorded in Boomi's own packageVersion and in this repo's deployment ledger."
         required: true
-      process_name:
-        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
-        required: false
       component_id:
-        description: "Boomi componentId — optional, resolved automatically from process_name if left blank. Leave both blank to package/deploy everything in components.json instead."
+        description: "Boomi componentId — optional, resolved automatically from process_name if left blank. Only needed if the process name isn't unique."
         required: false
       comment:
         description: "Optional note about this run (shown in the tracking issue)"
         required: false
 
 concurrency:
-  # One run at a time per process_name (or one shared bucket for
-  # components.json-driven runs), so two dispatches can't deploy to Dev
-  # for the same process concurrently.
-  group: ci-${{ github.event.inputs.process_name || 'components-json' }}
+  # One run at a time per process_name, so two dispatches can't deploy to
+  # Dev for the same process concurrently.
+  group: ci-${{ github.event.inputs.process_name }}
   cancel-in-progress: false
 
 permissions:
@@ -51,7 +52,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Determine process list to package
+      - name: Resolve process to package
         id: procs
         working-directory: scripts
         env:
@@ -60,15 +61,11 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          if [ -n "${{ github.event.inputs.process_name }}" ]; then
-            python write_ad_hoc_config.py \
-              --name "${{ github.event.inputs.process_name }}" \
-              --component-id "${{ github.event.inputs.component_id }}" \
-              --out ../ad_hoc_components.json >> "$GITHUB_OUTPUT"
-            echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
-          else
-            echo "config=../components/components.json" >> "$GITHUB_OUTPUT"
-          fi
+          python write_ad_hoc_config.py \
+            --name "${{ github.event.inputs.process_name }}" \
+            --component-id "${{ github.event.inputs.component_id }}" \
+            --out ../ad_hoc_components.json >> "$GITHUB_OUTPUT"
+          echo "config=../ad_hoc_components.json" >> "$GITHUB_OUTPUT"
 
       # Runs after the step above so the issue shows the resolved
       # componentId even when only a process_name was given.
@@ -77,7 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name || 'components.json processes' }} (${{ github.event.inputs.version }})"
+          issue_title="Build & Deploy to Dev — ${{ github.event.inputs.process_name }} (${{ github.event.inputs.version }})"
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ github.event.inputs.process_name }}",
@@ -128,7 +125,7 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          python deploy_component.py --process-name "${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}" \
+          python deploy_component.py --process-name "${{ github.event.inputs.process_name }}" \
             --packages ../packages.json --env dev --config ../environments/dev.json
 
       # Records this Dev deploy into deployments/{ledger,current}.csv and
@@ -139,7 +136,7 @@ jobs:
       - name: Record deployment in ledger
         if: steps.deploy.outcome == 'success'
         run: |
-          proc_name="${{ github.event.inputs.process_name || 'PLACEHOLDER-sample-process' }}"
+          proc_name="${{ github.event.inputs.process_name }}"
           package_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .package_id' packages.json)
           component_id=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .component_id' packages.json)
           version=$(jq -r --arg name "$proc_name" '.packages[] | select(.name==$name) | .version' packages.json)

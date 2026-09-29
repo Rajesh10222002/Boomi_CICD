@@ -14,15 +14,20 @@ on:
         options:
           - qa
           - prod
+      version:
+        description: "Optional — promote this specific version (e.g. v1.0) instead of whatever's currently deployed in the environment below. Must have actually been deployed there at some point (checked against the ledger)."
+        required: false
+        type: string
       comment:
         description: "Optional note about this promotion (shown in the tracking issue)"
         required: false
         type: string
-      # No package_id here on purpose: a promotion always takes whatever's
-      # currently deployed one environment down (see "Resolve" step below).
-      # A process that was never deployed to Dev cannot be promoted straight
-      # to QA. The only place an explicit, older package_id is accepted is
-      # the workflow_call interface below, used exclusively by rollback.yml.
+      # No package_id here on purpose: a promotion always resolves from the
+      # environment one below (current, or a specific --version of it — see
+      # "Resolve" step below), never an arbitrary package. A process that
+      # was never deployed to Dev cannot be promoted straight to QA. The
+      # only place an explicit, older package_id is accepted is the
+      # workflow_call interface below, used exclusively by rollback.yml.
 
   # Lets rollback.yml redeploy an older package through this same workflow,
   # so a rollback gets the identical tracking-issue / approval-gate /
@@ -101,7 +106,7 @@ jobs:
           else
             source_env="dev"
             if [ "${{ inputs.target_environment }}" = "prod" ]; then source_env="qa"; fi
-            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" >> "$GITHUB_OUTPUT"
+            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" --version "${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create tracking issue

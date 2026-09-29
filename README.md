@@ -101,26 +101,30 @@ native `workflow_dispatch` flow below is the only supported path.)
 
 ## Using it
 
-Only a process name is needed for either workflow — `componentId`/`packageId`
-resolve automatically server-side (via `BoomiClient.find_component_by_name()`
-/ `find_latest_package()`), the same way "List Boomi Processes" looks them up.
+A process name is all that's needed — `componentId` resolves automatically
+server-side (via `BoomiClient.find_component_by_name()`, the same way "List
+Boomi Processes" looks it up), and `packageId` resolves from this repo's own
+deployment ledger, not a raw Boomi lookup.
 
 1. **Build & deploy to Dev**: Actions tab → **`ci.yml`** → Run workflow →
-   fill in `process_name` (leave `component_id` blank) and `version` (e.g.
-   `v1.1` — required; this is the version being updated in the Boomi
-   process, becomes the packaged component's version in Boomi, and is
-   recorded in the ledger). Opens a tracking Issue, closes it with the
-   outcome when the run finishes.
+   `process_name` and `version` (e.g. `v1.1`) are both required (leave
+   `component_id` blank unless the name isn't unique). `version` becomes
+   the packaged component's actual version in Boomi and is recorded in the
+   ledger. Opens a tracking Issue, closes it with the outcome when the run
+   finishes.
 2. **Promote to QA/PD**: Actions tab → **`cd.yml`** → Run workflow →
    `process_name`, `target_environment` (`qa` or `prod`). There's no
-   `package_id` field here — promotion always takes whatever the
-   deployment ledger says is *currently deployed one environment down*
-   (Dev's current package for a `qa` promotion, QA's for a `prod`
-   promotion), a real Dev → QA → PD chain. A process that hasn't actually
-   been deployed to the environment below yet can't be promoted — the run
-   fails with a clear message rather than guessing. Same tracking-Issue
-   pattern; promoting to `prod` additionally waits on the `production`
-   Environment's reviewers.
+   `package_id` field here — promotion resolves whatever the deployment
+   ledger says is *currently deployed one environment down* (Dev's current
+   package for a `qa` promotion, QA's for a `prod` promotion), a real
+   Dev → QA → PD chain. Optionally, fill in `version` to promote a
+   *specific* older version instead of the current one (it must have
+   actually been deployed to that lower environment at some point — checked
+   against the ledger, never an arbitrary guess). A process (or version)
+   that hasn't actually been deployed to the environment below can't be
+   promoted — the run fails with a clear message rather than guessing.
+   Same tracking-Issue pattern; promoting to `prod` additionally waits on
+   the `production` Environment's reviewers.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment`. Leave `package_id` blank and it
    auto-picks the package that was actually live in that environment just

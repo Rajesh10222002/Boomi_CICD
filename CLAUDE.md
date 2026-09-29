@@ -89,27 +89,33 @@ isn't filled in yet, ask rather than inventing a value:
 - `.github/workflows/ci.yml` ("Build & Deploy to Dev") — `workflow_dispatch`
   only (dropped push/pull_request triggers — packaging/deploying to Dev is
   deliberately a manual action now, not something that fires on every
-  commit; see "What's still open" #5). Requires `version` (e.g. `v1.1` —
+  commit; see "What's still open" #5). **`process_name` and `version`
+  (e.g. `v1.1`) are both required** — no more "leave both process_name and
+  component_id blank to bulk-package components.json" path; this workflow
+  no longer reads `components/components.json` at all. `component_id`
+  stays optional, only for disambiguating a non-unique name. `version`
   becomes the Boomi package's `packageVersion` and is recorded in the
-  ledger). `process_name` (or a `process_name` + explicit `component_id`)
-  runs one ad-hoc process; leaving both blank packages/deploys everything
-  in `components/components.json` instead. Opens/closes a tracking GitHub
-  Issue on every run, posts a native GitHub Deployment record (`dev`),
-  records the deploy into `deployments/{ledger,current}.csv` and pushes
-  that commit back, and has a `concurrency` group keyed on `process_name`.
-- `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name` and
-  `target_environment` (qa|prod) only — **no `package_id` input on this
-  form**. Promotion always resolves the package via
-  `resolve_current_package.py` (whatever the ledger says is currently
-  deployed one environment down), records it into the ledger, and
-  opens/closes a tracking Issue. Split into a `prepare` job (resolves the
-  package, opens the issue) and a `deploy` job (the environment-gated one,
-  posts a GitHub Deployment record, records the ledger, closes the issue)
-  so a reviewer approving a prod promotion sees the linked issue, not just
-  raw inputs — see "What's still open" #2 below, now closed. Also declares
-  a separate `workflow_call` interface (`process_name`, `package_id`
-  required, `target_environment`, `comment`) so `rollback.yml` can invoke
-  it directly with an explicit older package — the *only* path into this
+  ledger. Opens/closes a tracking GitHub Issue on every run, posts a native
+  GitHub Deployment record (`dev`), records the deploy into
+  `deployments/{ledger,current}.csv` and pushes that commit back, and has
+  a `concurrency` group keyed on `process_name`.
+- `.github/workflows/cd.yml` — `workflow_dispatch` with `process_name`,
+  `target_environment` (qa|prod), and an optional `version` — **no
+  `package_id` input on this form**. Promotion resolves the package via
+  `resolve_current_package.py`: blank `version` = whatever the ledger says
+  is currently deployed one environment down; an explicit `version` (e.g.
+  promote an older tested build instead of Dev's newest) = looked up by
+  that label in `deployments/ledger.csv`, still only ever something that
+  was actually deployed to that lower environment — never an arbitrary
+  package. Records the result into the ledger and opens/closes a tracking
+  Issue. Split into a `prepare` job (resolves the package, opens the
+  issue) and a `deploy` job (the environment-gated one, posts a GitHub
+  Deployment record, records the ledger, closes the issue) so a reviewer
+  approving a prod promotion sees the linked issue, not just raw inputs —
+  see "What's still open" #2 below, now closed. Also declares a separate
+  `workflow_call` interface (`process_name`, `package_id` required,
+  `target_environment`, `comment`) so `rollback.yml` can invoke it
+  directly with an explicit older package — the *only* path into this
   workflow that accepts an arbitrary `package_id` — reusing the same
   issue/approval/deployment-record/ledger machinery for a rollback. Has a
   `concurrency` group keyed on process+environment.
@@ -122,6 +128,12 @@ isn't filled in yet, ask rather than inventing a value:
 - `.github/workflows/list-processes.yml` / `list-packages.yml` — one-off
   `workflow_dispatch` lookups (components+latest-package; full package
   history for one process), printed to the Actions job summary.
+  `list_packages.py` requires `--name` or `--component-id` to have an
+  actual value, not just be passed — the workflow always passes both
+  flags (one may be `""`), so a bare mutually-exclusive-group's
+  `required=True` doesn't catch "both left blank" and used to reach the
+  Boomi API with an empty name, surfacing a confusing `LookupError`
+  instead of a clear message. Fixed by checking the values explicitly.
 - `.github/workflows/debug-secrets.yml` — prints SHA256 hashes of the Boomi
   secrets (never the values), to sanity-check what got saved.
 

@@ -15,10 +15,18 @@ from boomi_client import BoomiClient
 
 def main():
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--name", help="Process name to resolve to a componentId")
-    group.add_argument("--component-id", help="Boomi componentId directly")
+    parser.add_argument("--name", default="", help="Process name to resolve to a componentId")
+    parser.add_argument("--component-id", default="", help="Boomi componentId directly")
     args = parser.parse_args()
+
+    # Not a mutually-exclusive-group(required=True): the calling workflow
+    # always passes both flags (one may be ""), so argparse would only
+    # check that the flags were *passed*, not that either has a value —
+    # leaving both form fields blank would otherwise reach the Boomi API
+    # with an empty name and fail with a confusing LookupError instead of
+    # this clear message.
+    if not args.name and not args.component_id:
+        raise SystemExit("Provide either --name or --component-id — both were left blank.")
 
     client = BoomiClient()
     component_id = args.component_id or client.find_component_by_name(args.name)
