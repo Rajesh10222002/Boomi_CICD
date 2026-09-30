@@ -103,6 +103,12 @@ jobs:
         run: |
           if [ -n "${{ inputs.package_id }}" ]; then
             echo "package-id=${{ inputs.package_id }}" >> "$GITHUB_OUTPUT"
+            # rollback.yml's explicit package_id has no component-id/version
+            # of its own — look them up from our own ledger history (the
+            # same self-heal update_deployment_ledger.py does later, just
+            # surfaced earlier here so the diff step and issue below have
+            # them too, instead of both silently getting blanks).
+            python lookup_ledger_metadata.py --package-id "${{ inputs.package_id }}" >> "$GITHUB_OUTPUT"
           else
             source_env="dev"
             if [ "${{ inputs.target_environment }}" = "prod" ]; then source_env="qa"; fi

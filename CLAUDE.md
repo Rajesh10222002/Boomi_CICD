@@ -74,10 +74,18 @@ isn't filled in yet, ask rather than inventing a value:
   have a `version` column (the label `ci.yml`'s `version` input assigned at
   build time). `--component-id`/`--version` are optional: if omitted, looks
   up the most recent ledger row for the same `--package-id` and inherits
-  its values — this is how `cd.yml`'s ledger step stays correct for a
-  rollback's explicit `package_id`, which it otherwise has no metadata for.
-  Pure file I/O (no Boomi/GitHub calls) — the calling workflow step does the
-  `git commit`/`push`. See `deployments/README.md`.
+  its values. Pure file I/O (no Boomi/GitHub calls) — the calling workflow
+  step does the `git commit`/`push`. See `deployments/README.md`.
+- `scripts/lookup_ledger_metadata.py` — the same self-heal lookup as
+  above (`--package-id` -> component_id/version from `deployments/ledger.csv`),
+  but exposed directly to a workflow step instead of only running inside
+  `update_deployment_ledger.py`. `cd.yml`'s `prepare` job calls this in its
+  explicit-`package_id` branch (i.e. only when invoked by `rollback.yml`) —
+  without it, `steps.resolve.outputs.component-id`/`version` were silently
+  blank for every rollback, which meant the "Diff process structure" step
+  (needs `--component-id`) never worked and the tracking issue's version
+  showed empty, for rollbacks specifically. Promotions were never affected
+  — `resolve_current_package.py` already returns both fields together.
 - `scripts/resolve_current_package.py` — for `cd.yml`: resolves
   `process_name` + `--environment` to the packageId/componentId/version
   `deployments/current.csv` says is live there right now. Deliberately has
