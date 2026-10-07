@@ -8,9 +8,10 @@ on:
         required: true
         type: string
       checklist_mode:
-        description: "Select all, select none, or manually select checklist items. With manual, no selections skip validation."
+        description: "Select all to mark every item passed in the report; Manual uses the checkboxes; Select none skips validation. GitHub cannot auto-check the other fields."
         required: true
         type: choice
+        default: Manual
         options:
           - Manual
           - Select all
@@ -226,6 +227,10 @@ jobs:
             fi
             if [ "$checklist_mode" = "Select all" ]; then
               result="true"
+            elif [ "$result" != "true" ]; then
+              echo "| NOT RUN | $label |" >> "$GITHUB_STEP_SUMMARY"
+              checklist_details+="- [ ] $label (not selected)"$'\n'
+              return
             fi
             if [ "$result" = "true" ]; then
               echo "| PASS | $label |" >> "$GITHUB_STEP_SUMMARY"
@@ -297,8 +302,8 @@ jobs:
             echo "**All checklist items selected as passed.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
             write_outputs "All checklist items passed (select all)"
           else
-            echo "**All checklist items were attested.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
-            write_outputs "All checklist items passed (manual)"
+            echo "**Selected checklist items passed; unselected items were not run.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
+            write_outputs "Selected checklist items passed (manual)"
           fi
 
   # Resolves the package and opens the QA tracking issue before the QA

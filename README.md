@@ -27,11 +27,11 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       ledger. Records the Dev deploy into deployments/.
   cd.yml             Manually validate and promote Dev -> QA, then
                       automatically promote the same package QA -> PD when
-                      QA succeeds. Every checklist item must be attested
-                      first; failures are listed in the job summary and
-                      block both deployments. Production Environment
-                      reviewers, if configured, still gate the automatic
-                      promotion. Also callable by rollback.yml
+                      QA succeeds. Checklist can be manually attested,
+                      marked all-pass, or explicitly skipped; failures in
+                      manual mode block both deployments. Production
+                      Environment reviewers, if configured, still gate the
+                      automatic promotion. Also callable by rollback.yml
                       (workflow_call, the one place an explicit older
                       package_id is accepted).
   rollback.yml       Redeploy an older package to Dev, QA, or PD
@@ -131,11 +131,15 @@ deployment ledger, not a raw Boomi lookup.
    building/deploying.
 2. **Validate Dev and promote to QA/PD**: Actions tab → **`cd.yml`** → Run
    workflow → enter `process_name` and choose `checklist_mode`. **Select all**
-   treats every checklist item as passed.
-   With **Manual**, select the individual checklist items to attest: if some
-   but not all are selected, the run fails and lists unchecked items; if
-   none are selected, validation is skipped. **Select none** also skips
-   validation. These are human attestations;
+   marks every item as passed in the workflow summary and approval issue.
+   GitHub Actions cannot dynamically tick the other checkbox inputs in the
+   form, so use this dropdown to attest all instead of expecting those boxes
+   to change visually.
+   With **Manual**, select only the individual items you want to attest:
+   selected items are reported as PASS, unchecked items as NOT RUN, and
+   unchecked items do not block promotion. If none are selected, validation
+   is skipped. **Select none** also skips validation. **Manual** is the safe
+   default. These are human attestations;
    the workflow does not inspect Boomi to prove qualitative checks. Before
    each approval gate, the tracking issue and job summary show the validation
    status and each checklist item as passed or not validated. The workflow
