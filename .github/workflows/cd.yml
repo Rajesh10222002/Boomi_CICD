@@ -7,27 +7,128 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
-      target_environment:
-        description: "Environment to promote into"
-        required: true
-        type: choice
-        options:
-          - qa
-          - prod
       version:
         description: "Optional — promote this specific version (e.g. v1.0) instead of whatever's currently deployed in the environment below. Must have actually been deployed there at some point (checked against the ledger)."
         required: false
         type: string
-      comment:
-        description: "Optional note about this promotion (shown in the tracking issue)"
-        required: false
-        type: string
-      # No package_id here on purpose: a promotion always resolves from the
-      # environment one below (current, or a specific --version of it — see
-      # "Resolve" step below), never an arbitrary package. A process that
-      # was never deployed to Dev cannot be promoted straight to QA. The
-      # only place an explicit, older package_id is accepted is the
-      # workflow_call interface below, used exclusively by rollback.yml.
+      process_name_convention:
+        description: "Process name follows PR_LOAD_[Domain]_[Object]_[Direction]_[Target]"
+        required: true
+        type: boolean
+        default: false
+      shapes_labeled:
+        description: "All shapes are clearly labeled; no unnamed connectors or maps"
+        required: true
+        type: boolean
+        default: false
+      subprocesses_reused:
+        description: "Sub-processes are used appropriately for reusable logic"
+        required: true
+        type: boolean
+        default: false
+      process_description:
+        description: "Process notes or description field is populated"
+        required: true
+        type: boolean
+        default: false
+      connections_shared:
+        description: "Connection components are shared/reused; no duplicates created"
+        required: true
+        type: boolean
+        default: false
+      credentials_in_extensions:
+        description: "Credentials are stored in connection extensions, not hardcoded"
+        required: true
+        type: boolean
+        default: false
+      connector_operations_scoped:
+        description: "Connector operations are not reused across unrelated contexts"
+        required: true
+        type: boolean
+        default: false
+      maps_clean:
+        description: "Maps have no orphaned source or destination fields"
+        required: true
+        type: boolean
+        default: false
+      map_scripting:
+        description: "Map scripting is minimal and well-commented"
+        required: true
+        type: boolean
+        default: false
+      document_properties:
+        description: "Document/dynamic properties are used correctly, not overloaded"
+        required: true
+        type: boolean
+        default: false
+      sensitive_data_protected:
+        description: "Sensitive data is not unnecessarily written to logs/cache"
+        required: true
+        type: boolean
+        default: false
+      error_handling_complete:
+        description: "Try/Catch or error paths capture all errors, not just document errors"
+        required: true
+        type: boolean
+        default: false
+      error_notifications:
+        description: "Error notifications are configured (email/Slack webhook)"
+        required: true
+        type: boolean
+        default: false
+      dead_letter_configured:
+        description: "Failed documents go to a dead-letter path/DB for reprocessing"
+        required: true
+        type: boolean
+        default: false
+      retry_configured:
+        description: "Transient/timeout failures have retry logic"
+        required: true
+        type: boolean
+        default: false
+      error_context:
+        description: "Generic errors include field, source/target, and directory context as applicable"
+        required: true
+        type: boolean
+        default: false
+      batch_processing:
+        description: "Batch processing is used where applicable; no unnecessary loops"
+        required: true
+        type: boolean
+        default: false
+      document_cache:
+        description: "Document caching is appropriate; stale caches are cleared"
+        required: true
+        type: boolean
+        default: false
+      schedules_do_not_overlap:
+        description: "Scheduled processes do not overlap; execution window is realistic"
+        required: true
+        type: boolean
+        default: false
+      representative_dev_test:
+        description: "Process was tested in Dev with representative data"
+        required: true
+        type: boolean
+        default: false
+      happy_and_error_paths_tested:
+        description: "Happy path and error path have both been tested"
+        required: true
+        type: boolean
+        default: false
+      test_evidence:
+        description: "Test execution logs/screenshots are attached or referenced"
+        required: true
+        type: boolean
+        default: false
+      test_shapes_removed:
+        description: "No test data or test-only shapes remain in the process"
+        required: true
+        type: boolean
+        default: false
+      # No package_id here on purpose: the manual path resolves the package
+      # from Dev and runs QA -> production in sequence. The workflow_call
+      # interface below remains for rollback.yml.
 
   # Lets rollback.yml redeploy an older package through this same workflow,
   # so a rollback gets the identical tracking-issue / approval-gate /
@@ -49,9 +150,8 @@ on:
         type: string
 
 concurrency:
-  # One promotion (or rollback) at a time per process+environment, so two
-  # dispatches can't deploy to the same target concurrently.
-  group: cd-${{ inputs.process_name }}-${{ inputs.target_environment }}
+  # Keep each process's full QA -> production chain serialized.
+  group: cd-${{ inputs.process_name }}
   cancel-in-progress: false
 
 permissions:
@@ -60,11 +160,78 @@ permissions:
   deployments: write
 
 jobs:
-  # Resolves the package to deploy and opens the tracking issue *before*
-  # the "deploy" job's environment gate — so a required reviewer approving
-  # a prod promotion sees this issue already linked to the run (who, what,
-  # why), not just the raw workflow inputs GitHub shows natively.
+  validate-checklist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Dev-to-QA checklist
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          failed=()
+          {
+            echo "## Dev-to-QA validation checklist"
+            echo ""
+            echo "| Result | Criterion |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          check() {
+            label="$1"
+            result="$2"
+            if [ "$result" = "true" ]; then
+              echo "| PASS | $label |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| FAIL | $label |" >> "$GITHUB_STEP_SUMMARY"
+              failed+=("$label")
+            fi
+          }
+
+          check "Process naming convention" "${{ inputs.process_name_convention }}"
+          check "Shapes clearly labeled" "${{ inputs.shapes_labeled }}"
+          check "Reusable sub-processes used appropriately" "${{ inputs.subprocesses_reused }}"
+          check "Process description populated" "${{ inputs.process_description }}"
+          check "Connection components shared without duplicates" "${{ inputs.connections_shared }}"
+          check "Credentials stored in connection extensions" "${{ inputs.credentials_in_extensions }}"
+          check "Connector operations scoped to their integration context" "${{ inputs.connector_operations_scoped }}"
+          check "Maps have no orphaned fields" "${{ inputs.maps_clean }}"
+          check "Map scripting is minimal and well-commented" "${{ inputs.map_scripting }}"
+          check "Document/dynamic properties used correctly" "${{ inputs.document_properties }}"
+          check "Sensitive data protected from unnecessary logs/cache" "${{ inputs.sensitive_data_protected }}"
+          check "Try/Catch or error paths capture all errors, not just document errors" "${{ inputs.error_handling_complete }}"
+          check "Error notifications configured" "${{ inputs.error_notifications }}"
+          check "Dead-letter path/DB stores failed documents for reprocessing" "${{ inputs.dead_letter_configured }}"
+          check "Retry logic configured for transient/timeout failures" "${{ inputs.retry_configured }}"
+          check "Generic error messages include field/source/target/directory context as applicable" "${{ inputs.error_context }}"
+          check "Batch processing used where applicable" "${{ inputs.batch_processing }}"
+          check "Document cache used and cleared appropriately" "${{ inputs.document_cache }}"
+          check "Scheduled executions do not overlap" "${{ inputs.schedules_do_not_overlap }}"
+          check "Dev testing used representative data" "${{ inputs.representative_dev_test }}"
+          check "Happy and error paths tested" "${{ inputs.happy_and_error_paths_tested }}"
+          check "Test execution evidence attached or referenced" "${{ inputs.test_evidence }}"
+          check "Test-only data and shapes removed" "${{ inputs.test_shapes_removed }}"
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            failed_items=$(printf '%s; ' "${failed[@]}")
+            {
+              echo ""
+              echo "### Promotion blocked"
+              echo ""
+              echo "QA deployment and the follow-on production promotion did not run. Failed checklist items:"
+              for item in "${failed[@]}"; do
+                echo "- $item"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Dev-to-QA validation failed. Unchecked items: ${failed_items%; }. See the job summary."
+            exit 1
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "All checklist items were attested. The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
+
+  # Resolves the package and opens the QA tracking issue before the QA
+  # Environment gate. The production issue is opened after QA succeeds and
+  # before the production gate.
   prepare:
+    needs: validate-checklist
     runs-on: ubuntu-latest
     outputs:
       package-id: ${{ steps.resolve.outputs.package-id }}
@@ -81,9 +248,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Promoting always means "take whatever's currently deployed in the
-      # environment below this one" (Dev -> QA, QA -> PD), read from this
-      # repo's own deployment ledger — never an arbitrary package that was
+      # The manual path takes the package currently deployed in Dev (or an
+      # explicitly selected version), read from this repo's own deployment
+      # ledger — never an arbitrary package that was
       # built but never actually deployed there. This is enforced
       # structurally, not just a default: workflow_dispatch (the human
       # form above) has no package_id input at all, so `inputs.package_id`
@@ -115,14 +282,12 @@ jobs:
             python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" --version "${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # Best-effort, display-only lookup of what's currently in the
-      # *target* environment (before this promotion) so the issue/job
-      # summary show a before -> after diff for whoever approves the
-      # "deploy" job's environment gate.
+      # Best-effort, display-only lookup of what's currently in QA before
+      # this promotion.
       - name: Describe current target-environment state
         id: current
         working-directory: scripts
-        run: python describe_current.py --name "${{ inputs.process_name }}" --environment "${{ inputs.target_environment }}" >> "$GITHUB_OUTPUT"
+        run: python describe_current.py --name "${{ inputs.process_name }}" --environment "${{ inputs.target_environment || 'qa' }}" >> "$GITHUB_OUTPUT"
 
       # Structural diff (elements/attributes changed, in plain terms, not
       # raw XML) on top of the version/package-id diff above — see
@@ -157,19 +322,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          diff_line="${{ inputs.target_environment }}: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
+          target_environment="${{ inputs.target_environment || 'qa' }}"
+          diff_line="$target_environment: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
           if [ "${{ steps.xmldiff.outputs.xml-diff-available }}" = "true" ]; then
             xml_diff_note="See this run's job summary and the process-diff artifact."
           else
             xml_diff_note="Not available for this run (see job summary/logs for why)."
           fi
-          issue_title="Promote ${{ inputs.process_name }} to ${{ inputs.target_environment }}"
+          issue_title="Promote ${{ inputs.process_name }} to $target_environment"
           issue_body=$(cat <<EOF
           {
           "process_name": "${{ inputs.process_name }}",
           "package_id": "${{ steps.resolve.outputs.package-id }}",
           "version": "${{ steps.resolve.outputs.version }}",
-          "target_environment": "${{ inputs.target_environment }}",
+          "target_environment": "$target_environment",
           "diff": "$diff_line",
           "process_diff": "$xml_diff_note",
           "requested_by": "${{ github.actor }}",
@@ -181,12 +347,12 @@ jobs:
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "${{ inputs.target_environment }}" '{title: $title, body: $body, labels: ["promote", $env]}')" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "$target_environment" '{title: $title, body: $body, labels: ["promote", $env]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
-          echo "## Promote ${{ inputs.process_name }} to ${{ inputs.target_environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Promote ${{ inputs.process_name }} to $target_environment" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -195,11 +361,9 @@ jobs:
   deploy:
     needs: prepare
     runs-on: ubuntu-latest
-    # The "prod" choice maps to the GitHub Environment named "production" so
-    # that Environment's required reviewers (if configured) gate this job.
-    # The "prepare" job above already opened the tracking issue, so a
-    # reviewer approving here sees it linked rather than approving blind.
-    environment: ${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment }}
+    # The manual workflow targets QA. Calls from rollback.yml retain their
+    # requested target, including production's required-reviewer gate.
+    environment: ${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment || 'qa' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +379,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          env_name="${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment }}"
+          env_name="${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment || 'qa' }}"
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -237,8 +401,8 @@ jobs:
         run: |
           python deploy_component.py \
             --package-id "${{ needs.prepare.outputs.package-id }}" \
-            --env "${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}" \
-            --config "../environments/${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}.json"
+            --env "${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}" \
+            --config "../environments/${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}.json"
 
       # Records this promotion into deployments/{ledger,current}.csv and
       # pushes it back to the repo with the run's own GITHUB_TOKEN — GitHub
@@ -253,7 +417,7 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          env_name="${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment }}"
+          env_name="${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}"
           python scripts/update_deployment_ledger.py \
             --process-name "${{ inputs.process_name }}" \
             --component-id "${{ needs.prepare.outputs.component-id }}" \
@@ -313,3 +477,162 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"
+
+  prepare-production:
+    needs: [prepare, deploy]
+    if: github.event_name == 'workflow_dispatch' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      issue-number: ${{ steps.create_issue.outputs.issue-number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Describe current production state
+        id: current
+        working-directory: scripts
+        run: python describe_current.py --name "${{ inputs.process_name }}" --environment prod >> "$GITHUB_OUTPUT"
+
+      - name: Create production tracking issue
+        id: create_issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ needs.prepare.outputs.version }} (package ${{ needs.prepare.outputs.package-id }})"
+          issue_title="Auto-promote ${{ inputs.process_name }} to production"
+          issue_body="Automatic production promotion after successful Dev-to-QA checklist validation and QA deployment.
+
+$diff_line
+
+Requested by: ${{ github.actor }}
+Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          response=$(curl -s -X POST \
+            -H "Authorization: ******" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "prod"]}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues")
+          issue_number=$(echo "$response" | jq -r '.number')
+          echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
+
+          echo "## Automatic QA-to-production promotion" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
+          echo "This job waits on any required reviewers configured for the production Environment." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-production:
+    needs: [prepare, prepare-production]
+    if: github.event_name == 'workflow_dispatch' && needs.prepare-production.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync latest deployment ledger
+        run: |
+          git fetch origin "${{ github.ref_name }}"
+          git show "origin/${{ github.ref_name }}:deployments/ledger.csv" > deployments/ledger.csv
+          git show "origin/${{ github.ref_name }}:deployments/current.csv" > deployments/current.csv
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create production deployment record
+        id: create_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          response=$(curl -s -X POST \
+            -H "Authorization: ******" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg ref "${{ github.sha }}" \
+                  --arg desc "Automatic promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
+                  '{ref: $ref, environment: "production", auto_merge: false, required_contexts: [], description: $desc}')" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments")
+          deployment_id=$(echo "$response" | jq -r '.id')
+          echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy the same package from QA to production
+        id: deploy
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          python deploy_component.py \
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --env prod \
+            --config "../environments/prod.json"
+
+      - name: Record production deployment in ledger
+        if: steps.deploy.outcome == 'success'
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          python scripts/update_deployment_ledger.py \
+            --process-name "${{ inputs.process_name }}" \
+            --component-id "${{ needs.prepare.outputs.component-id }}" \
+            --environment prod \
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --action promote --status success \
+            --requested-by "${{ github.actor }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployments/
+          if git diff --cached --quiet; then
+            echo "No ledger changes to commit."
+          else
+            git commit -m "Record automatic production promotion: ${{ inputs.process_name }} (${{ needs.prepare.outputs.package-id }})"
+            pushed=false
+            for attempt in 1 2 3; do
+              git fetch origin "${{ github.ref_name }}"
+              if git rebase "origin/${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                pushed=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$pushed" != true ]; then
+              echo "::warning::Failed to push deployment-ledger update after 3 attempts — deployments/*.csv is now out of date until this is reconciled manually."
+            fi
+          fi
+
+      - name: Finalize production deployment and tracking issue
+        if: always() && needs.prepare-production.outputs.issue-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          outcome="${{ job.status }}"
+          state="success"
+          if [ "$outcome" != "success" ]; then state="failure"; fi
+
+          if [ -n "${{ steps.create_deployment.outputs.deployment-id }}" ]; then
+            curl -s -X POST \
+              -H "Authorization: ******" \
+              -H "Accept: application/vnd.github+json" \
+              -d "$(jq -n --arg state "$state" '{state: $state, description: ("Run finished with status: " + $state)}')" \
+              "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
+          fi
+
+          curl -s -X POST \
+            -H "Authorization: ******" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}/comments"
+          curl -s -X PATCH \
+            -H "Authorization: ******" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state": "closed"}' \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}"

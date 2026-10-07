@@ -3,8 +3,9 @@
 Automates packaging, testing, and promoting Boomi integration processes through
 **Dev → QA → PD**, driven entirely by GitHub Actions — no separate admin app,
 no third-party hosting, no custom login. You trigger runs from the Actions
-tab, and every manual run opens (then closes) a GitHub Issue as its audit
-record.
+tab. Deployment runs open (then close) a GitHub Issue as their audit record;
+a failed Dev-to-QA checklist is reported in the Actions job summary before
+any deployment issue is opened.
 
 Full design doc (architecture, decisions, open questions): see the linked plan
 shared with this repo, or `docs/PLAN.md` once exported here.
@@ -24,18 +25,15 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       push). Requires a version label (e.g. v1.1) — becomes
                       the Boomi package's version and is recorded in the
                       ledger. Records the Dev deploy into deployments/.
-  cd.yml             Promote to QA or PD (workflow_dispatch) — always takes
-                      whatever the ledger says is currently deployed one
-                      environment down (Dev's current package for a qa
-                      promotion, QA's for a prod promotion); there is no
-                      package_id input on this form, so a process that was
-                      never actually deployed to the environment below
-                      cannot be promoted — the run fails with a clear
-                      message instead of guessing. Also callable by
-                      rollback.yml (workflow_call, the one place an explicit
-                      older package_id is accepted) so a rollback gets the
-                      same tracking issue / approval gate / deployment
-                      record / ledger update as a normal promotion.
+  cd.yml             Manually validate and promote Dev -> QA, then
+                      automatically promote the same package QA -> PD when
+                      QA succeeds. Every checklist item must be attested
+                      first; failures are listed in the job summary and
+                      block both deployments. Production Environment
+                      reviewers, if configured, still gate the automatic
+                      promotion. Also callable by rollback.yml
+                      (workflow_call, the one place an explicit older
+                      package_id is accepted).
   rollback.yml       Redeploy an older package to Dev, QA, or PD
                       (workflow_dispatch) — leave package_id blank to
                       auto-pick the version that was actually live in
@@ -99,10 +97,11 @@ native `workflow_dispatch` flow below is the only supported path.)
    and `production` (every workflow references one of these three by name,
    so create all of them even if you don't add reviewers to all of them
    yet). On whichever ones should require approval before that job runs —
-   `dev` gates `ci.yml`; `qa`/`production` gate `cd.yml` and, through it,
-   `rollback.yml` — add yourself (or whoever should approve) as a required
-   reviewer. Every run opens its tracking issue *before* this gate, with a
-   before → after diff (version/packageId) in the issue body and that
+   `dev` gates `ci.yml`; `qa` and `production` gate the corresponding
+   deployments in `cd.yml` and `rollback.yml` — add yourself (or whoever
+   should approve) as a required reviewer. Every deploy opens its tracking
+   issue *before* this gate, with a before → after diff (version/packageId)
+   in the issue body and that
    run's job summary, so the reviewer isn't approving blind — check those
    before clicking Approve in the "Review deployments" prompt GitHub shows
    on the run. The job summary also shows a **process diff** — actual
@@ -130,19 +129,19 @@ deployment ledger, not a raw Boomi lookup.
    prints the same to the run's job summary, then waits on the `dev`
    Environment's reviewers (if any are configured) before actually
    building/deploying.
-2. **Promote to QA/PD**: Actions tab → **`cd.yml`** → Run workflow →
-   `process_name`, `target_environment` (`qa` or `prod`). There's no
-   `package_id` field here — promotion resolves whatever the deployment
-   ledger says is *currently deployed one environment down* (Dev's current
-   package for a `qa` promotion, QA's for a `prod` promotion), a real
-   Dev → QA → PD chain. Optionally, fill in `version` to promote a
-   *specific* older version instead of the current one (it must have
-   actually been deployed to that lower environment at some point — checked
-   against the ledger, never an arbitrary guess). A process (or version)
-   that hasn't actually been deployed to the environment below can't be
-   promoted — the run fails with a clear message rather than guessing.
-   Same tracking-Issue-with-diff pattern as `ci.yml`; waits on the target
-   Environment's reviewers (`qa` or `production`) before deploying.
+2. **Validate Dev and promote to QA/PD**: Actions tab → **`cd.yml`** → Run
+   workflow → enter `process_name`, optionally `version`, and attest each
+   of the 23 checklist items. These are human attestations; the workflow
+   does not inspect the Boomi process to prove those qualitative checks.
+   Any unchecked item fails the validation job, lists every failed
+   criterion in the run summary, and prevents both deployments. If all
+   items pass, the workflow resolves the package currently deployed in Dev
+   (or the selected version, which must be in the ledger), deploys it to QA,
+   and then automatically promotes that same package to production after a
+   successful QA deployment. There is no separate QA-to-production
+   workflow dispatch. The QA and production GitHub Environment reviewer
+   gates remain in effect if configured; production approval can therefore
+   still pause the automated follow-on job.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
    `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it
@@ -169,9 +168,9 @@ deployment ledger, not a raw Boomi lookup.
    history) and `deployments/current.csv` (what's live right now, per
    process+environment) — see `deployments/README.md`. That's what makes
    the Dev → QA → PD chaining in #2 and the accurate rollback in #3 possible.
-   Two runs targeting the same process+environment can't overlap: each
-   workflow sets a `concurrency` group, so a second dispatch queues behind
-   the first instead of racing it.
+   Two `cd.yml` runs for the same process can't overlap: the workflow
+   serializes the complete QA-to-production chain so a second dispatch
+   queues behind the first instead of racing it.
 
 ## What's scaffolded vs. what's still TODO
 
