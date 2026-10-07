@@ -130,18 +130,21 @@ deployment ledger, not a raw Boomi lookup.
    Environment's reviewers (if any are configured) before actually
    building/deploying.
 2. **Validate Dev and promote to QA/PD**: Actions tab → **`cd.yml`** → Run
-   workflow → enter `process_name`, optionally `version`, and attest each
-   of the 23 checklist items. These are human attestations; the workflow
-   does not inspect the Boomi process to prove those qualitative checks.
-   Any unchecked item fails the validation job, lists every failed
-   criterion in the run summary, and prevents both deployments. If all
-   items pass, the workflow resolves the package currently deployed in Dev
-   (or the selected version, which must be in the ledger), deploys it to QA,
-   and then automatically promotes that same package to production after a
-   successful QA deployment. There is no separate QA-to-production
-   workflow dispatch. The QA and production GitHub Environment reviewer
-   gates remain in effect if configured; production approval can therefore
-   still pause the automated follow-on job.
+   workflow → enter `process_name` and choose `checklist_mode`. **Select all**
+   treats every checklist item as passed.
+   With **Manual**, select the individual checklist items to attest: if some
+   but not all are selected, the run fails and lists unchecked items; if
+   none are selected, validation is skipped. **Select none** also skips
+   validation. These are human attestations;
+   the workflow does not inspect Boomi to prove qualitative checks. Before
+   each approval gate, the tracking issue and job summary show the validation
+   status and each checklist item as passed or not validated. The workflow
+   always takes the package currently deployed in Dev, deploys it to QA,
+   then automatically promotes that same package to production after a
+   successful QA deployment. There is no version input or separate
+   QA-to-production dispatch. QA and production reviewer gates remain in
+   effect if configured; production approval can still pause the automatic
+   follow-on job.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
    `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it

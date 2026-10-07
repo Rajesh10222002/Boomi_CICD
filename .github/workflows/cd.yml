@@ -7,10 +7,14 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
-      version:
-        description: "Optional — promote this specific version (e.g. v1.0) instead of whatever's currently deployed in the environment below. Must have actually been deployed there at some point (checked against the ledger)."
-        required: false
-        type: string
+      checklist_mode:
+        description: "Select all, select none, or manually select checklist items. With manual, no selections skip validation."
+        required: true
+        type: choice
+        options:
+          - Manual
+          - Select all
+          - Select none
       process_name_convention:
         description: "Process name follows PR_LOAD_[Domain]_[Object]_[Direction]_[Target]"
         required: true
@@ -162,25 +166,73 @@ permissions:
 jobs:
   validate-checklist:
     runs-on: ubuntu-latest
+    outputs:
+      validation-status: ${{ steps.evaluate.outputs.validation-status }}
+      checklist-details: ${{ steps.evaluate.outputs.checklist-details }}
     steps:
       - name: Validate Dev-to-QA checklist
+        id: evaluate
         if: github.event_name == 'workflow_dispatch'
         run: |
           failed=()
+          checklist_details=""
+          checklist_mode="${{ inputs.checklist_mode }}"
+          selected_flags=(
+            "${{ inputs.process_name_convention }}"
+            "${{ inputs.shapes_labeled }}"
+            "${{ inputs.subprocesses_reused }}"
+            "${{ inputs.process_description }}"
+            "${{ inputs.connections_shared }}"
+            "${{ inputs.credentials_in_extensions }}"
+            "${{ inputs.connector_operations_scoped }}"
+            "${{ inputs.maps_clean }}"
+            "${{ inputs.map_scripting }}"
+            "${{ inputs.document_properties }}"
+            "${{ inputs.sensitive_data_protected }}"
+            "${{ inputs.error_handling_complete }}"
+            "${{ inputs.error_notifications }}"
+            "${{ inputs.dead_letter_configured }}"
+            "${{ inputs.retry_configured }}"
+            "${{ inputs.error_context }}"
+            "${{ inputs.batch_processing }}"
+            "${{ inputs.document_cache }}"
+            "${{ inputs.schedules_do_not_overlap }}"
+            "${{ inputs.representative_dev_test }}"
+            "${{ inputs.happy_and_error_paths_tested }}"
+            "${{ inputs.test_evidence }}"
+            "${{ inputs.test_shapes_removed }}"
+          )
+          selected_count=0
+          for selected in "${selected_flags[@]}"; do
+            if [ "$selected" = "true" ]; then
+              selected_count=$((selected_count + 1))
+            fi
+          done
+
           {
             echo "## Dev-to-QA validation checklist"
             echo ""
-            echo "| Result | Criterion |"
+            echo "| Status | Criterion |"
             echo "|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
           check() {
             label="$1"
             result="$2"
+            if [ "$checklist_mode" = "Select none" ] || { [ "$checklist_mode" = "Manual" ] && [ "$selected_count" -eq 0 ]; }; then
+              echo "| NOT VALIDATED | $label |" >> "$GITHUB_STEP_SUMMARY"
+              checklist_details+="- [ ] $label (not validated)"$'\n'
+              return
+            fi
+            if [ "$checklist_mode" = "Select all" ]; then
+              result="true"
+            fi
             if [ "$result" = "true" ]; then
               echo "| PASS | $label |" >> "$GITHUB_STEP_SUMMARY"
+              checklist_details+="- [x] $label"$'\n'
             else
               echo "| FAIL | $label |" >> "$GITHUB_STEP_SUMMARY"
+              checklist_details+="- [ ] $label (failed)"$'\n'
               failed+=("$label")
             fi
           }
@@ -209,6 +261,21 @@ jobs:
           check "Test execution evidence attached or referenced" "${{ inputs.test_evidence }}"
           check "Test-only data and shapes removed" "${{ inputs.test_shapes_removed }}"
 
+          write_outputs() {
+            echo "validation-status=$1" >> "$GITHUB_OUTPUT"
+            echo "checklist-details<<CHECKLIST_EOF" >> "$GITHUB_OUTPUT"
+            printf '%s' "$checklist_details" >> "$GITHUB_OUTPUT"
+            echo "CHECKLIST_EOF" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "$checklist_mode" = "Select none" ] || { [ "$checklist_mode" = "Manual" ] && [ "$selected_count" -eq 0 ]; }; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**No validation done.** Promotion is proceeding without checklist validation, as selected." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::No Dev-to-QA checklist validation was done; promotion is proceeding."
+            write_outputs "No validation done"
+            exit 0
+          fi
+
           if [ "${#failed[@]}" -gt 0 ]; then
             failed_items=$(printf '%s; ' "${failed[@]}")
             {
@@ -221,11 +288,18 @@ jobs:
               done
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::Dev-to-QA validation failed. Unchecked items: ${failed_items%; }. See the job summary."
+            write_outputs "Validation failed"
             exit 1
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "All checklist items were attested. The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$checklist_mode" = "Select all" ]; then
+            echo "**All checklist items selected as passed.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
+            write_outputs "All checklist items passed (select all)"
+          else
+            echo "**All checklist items were attested.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
+            write_outputs "All checklist items passed (manual)"
+          fi
 
   # Resolves the package and opens the QA tracking issue before the QA
   # Environment gate. The production issue is opened after QA succeeds and
@@ -238,6 +312,8 @@ jobs:
       component-id: ${{ steps.resolve.outputs.component-id }}
       version: ${{ steps.resolve.outputs.version }}
       issue-number: ${{ steps.create_issue.outputs.issue-number }}
+      validation-status: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.validation-status || 'Not applicable (rollback)' }}
+      checklist-details: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.checklist-details || 'Checklist attestation is only used by the manual Dev-to-QA promotion.' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -248,10 +324,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # The manual path takes the package currently deployed in Dev (or an
-      # explicitly selected version), read from this repo's own deployment
-      # ledger — never an arbitrary package that was
-      # built but never actually deployed there. This is enforced
+      # The manual path always takes the package currently deployed in Dev,
+      # read from this repo's own deployment ledger — never an arbitrary
+      # package that was built but never actually deployed there. This is enforced
       # structurally, not just a default: workflow_dispatch (the human
       # form above) has no package_id input at all, so `inputs.package_id`
       # is only ever non-empty when this workflow is invoked via
@@ -279,7 +354,7 @@ jobs:
           else
             source_env="dev"
             if [ "${{ inputs.target_environment }}" = "prod" ]; then source_env="qa"; fi
-            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" --version "${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" >> "$GITHUB_OUTPUT"
           fi
 
       # Best-effort, display-only lookup of what's currently in QA before
@@ -321,6 +396,8 @@ jobs:
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATION_STATUS: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.validation-status || 'Not applicable (rollback)' }}
+          CHECKLIST_DETAILS: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.checklist-details || 'Checklist attestation is only used by the manual Dev-to-QA promotion.' }}
         run: |
           target_environment="${{ inputs.target_environment || 'qa' }}"
           diff_line="$target_environment: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
@@ -331,17 +408,21 @@ jobs:
           fi
           issue_title="Promote ${{ inputs.process_name }} to $target_environment"
           issue_body=$(cat <<EOF
-          {
-          "process_name": "${{ inputs.process_name }}",
-          "package_id": "${{ steps.resolve.outputs.package-id }}",
-          "version": "${{ steps.resolve.outputs.version }}",
-          "target_environment": "$target_environment",
-          "diff": "$diff_line",
-          "process_diff": "$xml_diff_note",
-          "requested_by": "${{ github.actor }}",
-          "comment": "${{ inputs.comment }}",
-          "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
+          Process: ${{ inputs.process_name }}
+          Package: ${{ steps.resolve.outputs.package-id }}
+          Version: ${{ steps.resolve.outputs.version }}
+          Target: $target_environment
+          Deployment: $diff_line
+          Process diff: $xml_diff_note
+
+          Dev-to-QA validation: $VALIDATION_STATUS
+
+          Checklist:
+          $CHECKLIST_DETAILS
+
+          Requested by: ${{ github.actor }}
+          Comment: ${{ inputs.comment }}
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
           )
           response=$(curl -s -X POST \
@@ -355,6 +436,9 @@ jobs:
           echo "## Promote ${{ inputs.process_name }} to $target_environment" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Dev-to-QA validation: $VALIDATION_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "$CHECKLIST_DETAILS" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
 
@@ -496,14 +580,28 @@ jobs:
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATION_STATUS: ${{ needs.prepare.outputs.validation-status }}
+          CHECKLIST_DETAILS: ${{ needs.prepare.outputs.checklist-details }}
         run: |
           diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ needs.prepare.outputs.version }} (package ${{ needs.prepare.outputs.package-id }})"
           issue_title="Auto-promote ${{ inputs.process_name }} to production"
-          issue_body=$(printf '%s\n\n%s\n\nRequested by: %s\nRun: %s' \
-            "Automatic production promotion after successful Dev-to-QA checklist validation and QA deployment." \
-            "$diff_line" \
-            "${{ github.actor }}" \
-            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          issue_body=$(cat <<EOF
+          Automatic production promotion after successful QA deployment.
+
+          Process: ${{ inputs.process_name }}
+          Package: ${{ needs.prepare.outputs.package-id }}
+          Version: ${{ needs.prepare.outputs.version }}
+          Deployment: $diff_line
+
+          Dev-to-QA validation: $VALIDATION_STATUS
+
+          Checklist:
+          $CHECKLIST_DETAILS
+
+          Requested by: ${{ github.actor }}
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
           response=$(curl -s -X POST \
             -H "Authorization: ******" \
             -H "Accept: application/vnd.github+json" \
@@ -515,6 +613,9 @@ jobs:
           echo "## Automatic QA-to-production promotion" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Dev-to-QA validation: $VALIDATION_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "$CHECKLIST_DETAILS" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
           echo "This job waits on any required reviewers configured for the production Environment." >> "$GITHUB_STEP_SUMMARY"
