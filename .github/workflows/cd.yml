@@ -499,12 +499,11 @@ jobs:
         run: |
           diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ needs.prepare.outputs.version }} (package ${{ needs.prepare.outputs.package-id }})"
           issue_title="Auto-promote ${{ inputs.process_name }} to production"
-          issue_body="Automatic production promotion after successful Dev-to-QA checklist validation and QA deployment.
-
-$diff_line
-
-Requested by: ${{ github.actor }}
-Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          issue_body=$(printf '%s\n\n%s\n\nRequested by: %s\nRun: %s' \
+            "Automatic production promotion after successful Dev-to-QA checklist validation and QA deployment." \
+            "$diff_line" \
+            "${{ github.actor }}" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           response=$(curl -s -X POST \
             -H "Authorization: ******" \
             -H "Accept: application/vnd.github+json" \
