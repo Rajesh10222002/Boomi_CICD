@@ -7,130 +7,6 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
-      checklist_mode:
-        description: "Select all to mark every item passed in the report; Manual uses the checkboxes; Select none skips validation. GitHub cannot auto-check the other fields."
-        required: true
-        type: choice
-        default: Manual
-        options:
-          - Manual
-          - Select all
-          - Select none
-      process_name_convention:
-        description: "Process name follows PR_LOAD_[Domain]_[Object]_[Direction]_[Target]"
-        required: true
-        type: boolean
-        default: false
-      shapes_labeled:
-        description: "All shapes are clearly labeled; no unnamed connectors or maps"
-        required: true
-        type: boolean
-        default: false
-      subprocesses_reused:
-        description: "Sub-processes are used appropriately for reusable logic"
-        required: true
-        type: boolean
-        default: false
-      process_description:
-        description: "Process notes or description field is populated"
-        required: true
-        type: boolean
-        default: false
-      connections_shared:
-        description: "Connection components are shared/reused; no duplicates created"
-        required: true
-        type: boolean
-        default: false
-      credentials_in_extensions:
-        description: "Credentials are stored in connection extensions, not hardcoded"
-        required: true
-        type: boolean
-        default: false
-      connector_operations_scoped:
-        description: "Connector operations are not reused across unrelated contexts"
-        required: true
-        type: boolean
-        default: false
-      maps_clean:
-        description: "Maps have no orphaned source or destination fields"
-        required: true
-        type: boolean
-        default: false
-      map_scripting:
-        description: "Map scripting is minimal and well-commented"
-        required: true
-        type: boolean
-        default: false
-      document_properties:
-        description: "Document/dynamic properties are used correctly, not overloaded"
-        required: true
-        type: boolean
-        default: false
-      sensitive_data_protected:
-        description: "Sensitive data is not unnecessarily written to logs/cache"
-        required: true
-        type: boolean
-        default: false
-      error_handling_complete:
-        description: "Try/Catch or error paths capture all errors, not just document errors"
-        required: true
-        type: boolean
-        default: false
-      error_notifications:
-        description: "Error notifications are configured (email/Slack webhook)"
-        required: true
-        type: boolean
-        default: false
-      dead_letter_configured:
-        description: "Failed documents go to a dead-letter path/DB for reprocessing"
-        required: true
-        type: boolean
-        default: false
-      retry_configured:
-        description: "Transient/timeout failures have retry logic"
-        required: true
-        type: boolean
-        default: false
-      error_context:
-        description: "Generic errors include field, source/target, and directory context as applicable"
-        required: true
-        type: boolean
-        default: false
-      batch_processing:
-        description: "Batch processing is used where applicable; no unnecessary loops"
-        required: true
-        type: boolean
-        default: false
-      document_cache:
-        description: "Document caching is appropriate; stale caches are cleared"
-        required: true
-        type: boolean
-        default: false
-      schedules_do_not_overlap:
-        description: "Scheduled processes do not overlap; execution window is realistic"
-        required: true
-        type: boolean
-        default: false
-      representative_dev_test:
-        description: "Process was tested in Dev with representative data"
-        required: true
-        type: boolean
-        default: false
-      happy_and_error_paths_tested:
-        description: "Happy path and error path have both been tested"
-        required: true
-        type: boolean
-        default: false
-      test_evidence:
-        description: "Test execution logs/screenshots are attached or referenced"
-        required: true
-        type: boolean
-        default: false
-      test_shapes_removed:
-        description: "No test data or test-only shapes remain in the process"
-        required: true
-        type: boolean
-        default: false
       # No package_id here on purpose: the manual path resolves the package
       # from Dev and runs QA -> production in sequence. The workflow_call
       # interface below remains for rollback.yml.
@@ -165,160 +41,16 @@ permissions:
   deployments: write
 
 jobs:
-  validate-checklist:
-    runs-on: ubuntu-latest
-    outputs:
-      validation-status: ${{ steps.evaluate.outputs.validation-status }}
-      checklist-details: ${{ steps.evaluate.outputs.checklist-details }}
-    steps:
-      - name: Validate Dev-to-QA checklist
-        id: evaluate
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          failed=()
-          checklist_details=""
-          checklist_mode="${{ inputs.checklist_mode }}"
-          selected_flags=(
-            "${{ inputs.process_name_convention }}"
-            "${{ inputs.shapes_labeled }}"
-            "${{ inputs.subprocesses_reused }}"
-            "${{ inputs.process_description }}"
-            "${{ inputs.connections_shared }}"
-            "${{ inputs.credentials_in_extensions }}"
-            "${{ inputs.connector_operations_scoped }}"
-            "${{ inputs.maps_clean }}"
-            "${{ inputs.map_scripting }}"
-            "${{ inputs.document_properties }}"
-            "${{ inputs.sensitive_data_protected }}"
-            "${{ inputs.error_handling_complete }}"
-            "${{ inputs.error_notifications }}"
-            "${{ inputs.dead_letter_configured }}"
-            "${{ inputs.retry_configured }}"
-            "${{ inputs.error_context }}"
-            "${{ inputs.batch_processing }}"
-            "${{ inputs.document_cache }}"
-            "${{ inputs.schedules_do_not_overlap }}"
-            "${{ inputs.representative_dev_test }}"
-            "${{ inputs.happy_and_error_paths_tested }}"
-            "${{ inputs.test_evidence }}"
-            "${{ inputs.test_shapes_removed }}"
-          )
-          selected_count=0
-          for selected in "${selected_flags[@]}"; do
-            if [ "$selected" = "true" ]; then
-              selected_count=$((selected_count + 1))
-            fi
-          done
-
-          {
-            echo "## Dev-to-QA validation checklist"
-            echo ""
-            echo "| Status | Criterion |"
-            echo "|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          check() {
-            label="$1"
-            result="$2"
-            if [ "$checklist_mode" = "Select none" ] || { [ "$checklist_mode" = "Manual" ] && [ "$selected_count" -eq 0 ]; }; then
-              echo "| NOT VALIDATED | $label |" >> "$GITHUB_STEP_SUMMARY"
-              checklist_details+="- [ ] $label (not validated)"$'\n'
-              return
-            fi
-            if [ "$checklist_mode" = "Select all" ]; then
-              result="true"
-            elif [ "$result" != "true" ]; then
-              echo "| NOT RUN | $label |" >> "$GITHUB_STEP_SUMMARY"
-              checklist_details+="- [ ] $label (not selected)"$'\n'
-              return
-            fi
-            if [ "$result" = "true" ]; then
-              echo "| PASS | $label |" >> "$GITHUB_STEP_SUMMARY"
-              checklist_details+="- [x] $label"$'\n'
-            else
-              echo "| FAIL | $label |" >> "$GITHUB_STEP_SUMMARY"
-              checklist_details+="- [ ] $label (failed)"$'\n'
-              failed+=("$label")
-            fi
-          }
-
-          check "Process naming convention" "${{ inputs.process_name_convention }}"
-          check "Shapes clearly labeled" "${{ inputs.shapes_labeled }}"
-          check "Reusable sub-processes used appropriately" "${{ inputs.subprocesses_reused }}"
-          check "Process description populated" "${{ inputs.process_description }}"
-          check "Connection components shared without duplicates" "${{ inputs.connections_shared }}"
-          check "Credentials stored in connection extensions" "${{ inputs.credentials_in_extensions }}"
-          check "Connector operations scoped to their integration context" "${{ inputs.connector_operations_scoped }}"
-          check "Maps have no orphaned fields" "${{ inputs.maps_clean }}"
-          check "Map scripting is minimal and well-commented" "${{ inputs.map_scripting }}"
-          check "Document/dynamic properties used correctly" "${{ inputs.document_properties }}"
-          check "Sensitive data protected from unnecessary logs/cache" "${{ inputs.sensitive_data_protected }}"
-          check "Try/Catch or error paths capture all errors, not just document errors" "${{ inputs.error_handling_complete }}"
-          check "Error notifications configured" "${{ inputs.error_notifications }}"
-          check "Dead-letter path/DB stores failed documents for reprocessing" "${{ inputs.dead_letter_configured }}"
-          check "Retry logic configured for transient/timeout failures" "${{ inputs.retry_configured }}"
-          check "Generic error messages include field/source/target/directory context as applicable" "${{ inputs.error_context }}"
-          check "Batch processing used where applicable" "${{ inputs.batch_processing }}"
-          check "Document cache used and cleared appropriately" "${{ inputs.document_cache }}"
-          check "Scheduled executions do not overlap" "${{ inputs.schedules_do_not_overlap }}"
-          check "Dev testing used representative data" "${{ inputs.representative_dev_test }}"
-          check "Happy and error paths tested" "${{ inputs.happy_and_error_paths_tested }}"
-          check "Test execution evidence attached or referenced" "${{ inputs.test_evidence }}"
-          check "Test-only data and shapes removed" "${{ inputs.test_shapes_removed }}"
-
-          write_outputs() {
-            echo "validation-status=$1" >> "$GITHUB_OUTPUT"
-            echo "checklist-details<<CHECKLIST_EOF" >> "$GITHUB_OUTPUT"
-            printf '%s' "$checklist_details" >> "$GITHUB_OUTPUT"
-            echo "CHECKLIST_EOF" >> "$GITHUB_OUTPUT"
-          }
-
-          if [ "$checklist_mode" = "Select none" ] || { [ "$checklist_mode" = "Manual" ] && [ "$selected_count" -eq 0 ]; }; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "**No validation done.** Promotion is proceeding without checklist validation, as selected." >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::No Dev-to-QA checklist validation was done; promotion is proceeding."
-            write_outputs "No validation done"
-            exit 0
-          fi
-
-          if [ "${#failed[@]}" -gt 0 ]; then
-            failed_items=$(printf '%s; ' "${failed[@]}")
-            {
-              echo ""
-              echo "### Promotion blocked"
-              echo ""
-              echo "QA deployment and the follow-on production promotion did not run. Failed checklist items:"
-              for item in "${failed[@]}"; do
-                echo "- $item"
-              done
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Dev-to-QA validation failed. Unchecked items: ${failed_items%; }. See the job summary."
-            write_outputs "Validation failed"
-            exit 1
-          fi
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$checklist_mode" = "Select all" ]; then
-            echo "**All checklist items selected as passed.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
-            write_outputs "All checklist items passed (select all)"
-          else
-            echo "**Selected checklist items passed; unselected items were not run.** The workflow may proceed with the QA deployment." >> "$GITHUB_STEP_SUMMARY"
-            write_outputs "Selected checklist items passed (manual)"
-          fi
-
   # Resolves the package and opens the QA tracking issue before the QA
   # Environment gate. The production issue is opened after QA succeeds and
   # before the production gate.
   prepare:
-    needs: validate-checklist
     runs-on: ubuntu-latest
     outputs:
       package-id: ${{ steps.resolve.outputs.package-id }}
       component-id: ${{ steps.resolve.outputs.component-id }}
       version: ${{ steps.resolve.outputs.version }}
       issue-number: ${{ steps.create_issue.outputs.issue-number }}
-      validation-status: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.validation-status || 'Not applicable (rollback)' }}
-      checklist-details: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.checklist-details || 'Checklist attestation is only used by the manual Dev-to-QA promotion.' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -401,8 +133,6 @@ jobs:
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATION_STATUS: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.validation-status || 'Not applicable (rollback)' }}
-          CHECKLIST_DETAILS: ${{ github.event_name == 'workflow_dispatch' && needs.validate-checklist.outputs.checklist-details || 'Checklist attestation is only used by the manual Dev-to-QA promotion.' }}
         run: |
           target_environment="${{ inputs.target_environment || 'qa' }}"
           diff_line="$target_environment: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
@@ -420,11 +150,6 @@ jobs:
           Deployment: $diff_line
           Process diff: $xml_diff_note
 
-          Dev-to-QA validation: $VALIDATION_STATUS
-
-          Checklist:
-          $CHECKLIST_DETAILS
-
           Requested by: ${{ github.actor }}
           Comment: ${{ inputs.comment }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -441,9 +166,6 @@ jobs:
           echo "## Promote ${{ inputs.process_name }} to $target_environment" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Dev-to-QA validation: $VALIDATION_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "$CHECKLIST_DETAILS" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
 
@@ -585,8 +307,6 @@ jobs:
         id: create_issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATION_STATUS: ${{ needs.prepare.outputs.validation-status }}
-          CHECKLIST_DETAILS: ${{ needs.prepare.outputs.checklist-details }}
         run: |
           diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ needs.prepare.outputs.version }} (package ${{ needs.prepare.outputs.package-id }})"
           issue_title="Auto-promote ${{ inputs.process_name }} to production"
@@ -597,11 +317,6 @@ jobs:
           Package: ${{ needs.prepare.outputs.package-id }}
           Version: ${{ needs.prepare.outputs.version }}
           Deployment: $diff_line
-
-          Dev-to-QA validation: $VALIDATION_STATUS
-
-          Checklist:
-          $CHECKLIST_DETAILS
 
           Requested by: ${{ github.actor }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -618,9 +333,6 @@ jobs:
           echo "## Automatic QA-to-production promotion" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Dev-to-QA validation: $VALIDATION_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "$CHECKLIST_DETAILS" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
           echo "This job waits on any required reviewers configured for the production Environment." >> "$GITHUB_STEP_SUMMARY"

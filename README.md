@@ -4,8 +4,8 @@ Automates packaging, testing, and promoting Boomi integration processes through
 **Dev → QA → PD**, driven entirely by GitHub Actions — no separate admin app,
 no third-party hosting, no custom login. You trigger runs from the Actions
 tab. Deployment runs open (then close) a GitHub Issue as their audit record;
-a failed Dev-to-QA checklist is reported in the Actions job summary before
-any deployment issue is opened.
+the CD workflow promotes the current Dev package to QA and, if QA succeeds,
+automatically promotes that same package to production.
 
 Full design doc (architecture, decisions, open questions): see the linked plan
 shared with this repo, or `docs/PLAN.md` once exported here.
@@ -129,26 +129,14 @@ deployment ledger, not a raw Boomi lookup.
    prints the same to the run's job summary, then waits on the `dev`
    Environment's reviewers (if any are configured) before actually
    building/deploying.
-2. **Validate Dev and promote to QA/PD**: Actions tab → **`cd.yml`** → Run
-   workflow → enter `process_name` and choose `checklist_mode`. **Select all**
-   marks every item as passed in the workflow summary and approval issue.
-   GitHub Actions cannot dynamically tick the other checkbox inputs in the
-   form, so use this dropdown to attest all instead of expecting those boxes
-   to change visually.
-   With **Manual**, select only the individual items you want to attest:
-   selected items are reported as PASS, unchecked items as NOT RUN, and
-   unchecked items do not block promotion. If none are selected, validation
-   is skipped. **Select none** also skips validation. **Manual** is the safe
-   default. These are human attestations;
-   the workflow does not inspect Boomi to prove qualitative checks. Before
-   each approval gate, the tracking issue and job summary show the validation
-   status and each checklist item as passed or not validated. The workflow
-   always takes the package currently deployed in Dev, deploys it to QA,
-   then automatically promotes that same package to production after a
-   successful QA deployment. There is no version input or separate
-   QA-to-production dispatch. QA and production reviewer gates remain in
-   effect if configured; production approval can still pause the automatic
-   follow-on job.
+2. **Promote Dev to QA, then automatically to PD**: Actions tab →
+   **`cd.yml`** → Run workflow → enter `process_name`. The form has no
+   checklist or version input. The workflow takes the package currently
+   deployed in Dev, deploys it to QA, then automatically promotes that same
+   package to production only after the QA deployment succeeds. There is no
+   separate QA-to-production dispatch. QA and production reviewer gates
+   remain in effect if configured; production approval can still pause the
+   automatic follow-on job.
 3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
    `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
    `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it
