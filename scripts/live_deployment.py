@@ -30,6 +30,17 @@ def lookup(name, environment):
         return None
     if not dep:
         print(f"Boomi reports no active deployment of '{name}' ({component_id}) in {environment}.", file=sys.stderr)
+        try:
+            seen = client.list_deployed_packages(_environment_id(environment))
+            print(
+                f"Boomi returned {len(seen)} deployed package record(s) for the {environment} environment: "
+                + "; ".join(
+                    f"{r.get('componentId')} v{r.get('packageVersion')} active={r.get('active')}" for r in seen[:20]
+                ),
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"(could not list {environment} deployments for diagnostics: {exc})", file=sys.stderr)
         return None
     return (
         dep.get("packageId", ""),

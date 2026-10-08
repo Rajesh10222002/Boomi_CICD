@@ -127,20 +127,8 @@ class BoomiClient:
         resp = self._request("POST", self._url("DeployedPackage"), json=body)
         return resp.json()["deploymentId"]
 
-    def find_deployed_package(self, component_id, environment_id):
-        """
-        What Boomi itself says is live for a component in an environment
-        (the active DeployedPackage), regardless of how it got there —
-        including deploys done by hand in the Boomi UI that this repo's
-        ledger never saw. Returns the most recent matching DeployedPackage
-        dict (packageId, packageVersion, deployedDate, deployedBy, ...), or
-        None.
-
-        Queries by environment only (the one filter every account
-        supports) and matches componentId client-side, paging through
-        queryMore, rather than relying on server-side componentId/active
-        filters.
-        """
+    def list_deployed_packages(self, environment_id):
+        """Every DeployedPackage record Boomi returns for an environment (paged)."""
         query = {
             "QueryFilter": {
                 "expression": {"operator": "EQUALS", "property": "environmentId", "argument": [environment_id]}
@@ -157,6 +145,23 @@ class BoomiClient:
             data = resp.json()
             results.extend(data.get("result", []))
             token = data.get("queryToken")
+        return results
+
+    def find_deployed_package(self, component_id, environment_id):
+        """
+        What Boomi itself says is live for a component in an environment
+        (the active DeployedPackage), regardless of how it got there —
+        including deploys done by hand in the Boomi UI that this repo's
+        ledger never saw. Returns the most recent matching DeployedPackage
+        dict (packageId, packageVersion, deployedDate, deployedBy, ...), or
+        None.
+
+        Queries by environment only (the one filter every account
+        supports) and matches componentId client-side, paging through
+        queryMore, rather than relying on server-side componentId/active
+        filters.
+        """
+        results = self.list_deployed_packages(environment_id)
         matches = [
             r for r in results
             if r.get("componentId") == component_id and str(r.get("active", True)).lower() != "false"
