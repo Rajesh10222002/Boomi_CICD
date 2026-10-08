@@ -57,6 +57,24 @@ jobs:
         working-directory: scripts
         run: python describe_current.py --name "${{ inputs.process_name }}" --environment qa >> "$GITHUB_OUTPUT"
 
+      - name: Summary - promotion request
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          # 🚀 Promote `${{ inputs.process_name }}` to QA
+
+          | | |
+          |---|---|
+          | **Process** | ${{ inputs.process_name }} |
+          | **Version to deploy** | ${{ steps.resolve.outputs.version }} |
+          | **Package** | `${{ steps.resolve.outputs.package-id }}` |
+          | **Currently in QA** | ${{ steps.current.outputs.current }} |
+          | **Requested by** | @${{ github.actor }} |
+          | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          ---
+
+          EOF
+
       # Checklist validation (checklist.md) against the package's component
       # XML. Never fails the run: results (pass / fail / needs-review) go in
       # the job summary and tracking issue so the QA reviewer decides.
@@ -160,13 +178,21 @@ jobs:
             -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "qa"]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
+
+          if [ -z "$issue_number" ] || [ "$issue_number" = "null" ]; then
+            issue_number=""
+            echo "::warning::Could not create the tracking issue: $response"
+          fi
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
-          echo "## Promote ${{ inputs.process_name }} to QA" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "📌 **Tracking issue:** #$issue_number — closes automatically when this run finishes."
+            echo ""
+            echo "_Approve or reject the QA deployment with **Review deployments** at the top of this page._"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: prepare
@@ -319,19 +345,32 @@ jobs:
           EOF
           )
           response=$(curl -s -X POST \
-            -H "Authorization: ******" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "prod"]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
+
+          if [ -z "$issue_number" ] || [ "$issue_number" = "null" ]; then
+            issue_number=""
+            echo "::warning::Could not create the production tracking issue: $response"
+          fi
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
-          echo "## Automatic QA-to-production promotion" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
-          echo "This job waits on any required reviewers configured for the production Environment." >> "$GITHUB_STEP_SUMMARY"
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # 🚀 Promote \`${{ inputs.process_name }}\` to Production
+
+          | | |
+          |---|---|
+          | **Version** | ${{ needs.prepare.outputs.version }} |
+          | **Package** | \`${{ needs.prepare.outputs.package-id }}\` |
+          | **Currently in Production** | ${{ steps.current.outputs.current }} |
+          | **Source** | QA deployment succeeded in this run |
+
+          📌 **Tracking issue:** #$issue_number — closes automatically when this run finishes.
+
+          _Approve or reject with **Review deployments** if reviewers are configured on the production environment._
+          EOF
 
   deploy-production:
     needs: [prepare, prepare-production]
@@ -360,7 +399,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           response=$(curl -s -X POST \
-            -H "Authorization: ******" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg ref "${{ github.sha }}" \
                   --arg desc "Automatic promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
@@ -433,19 +472,55 @@ jobs:
 
           if [ -n "${{ steps.create_deployment.outputs.deployment-id }}" ]; then
             curl -s -X POST \
-              -H "Authorization: ******" \
+              -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -d "$(jq -n --arg state "$state" '{state: $state, description: ("Run finished with status: " + $state)}')" \
               "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
           fi
 
           curl -s -X POST \
-            -H "Authorization: ******" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}/comments"
           curl -s -X PATCH \
-            -H "Authorization: ******" \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}"
+
+  # Safety net: closes any tracking issue still open once the run is over —
+  # including when a reviewer rejects a gate (the gated job never starts, so
+  # its own "finalize" step never runs) or the run is cancelled.
+  close-issues:
+    needs: [prepare, deploy, prepare-production, deploy-production]
+    if: always() && needs.prepare.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close any open tracking issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QA_ISSUE: ${{ needs.prepare.outputs.issue-number }}
+          PROD_ISSUE: ${{ needs.prepare-production.outputs.issue-number }}
+          QA_RESULT: ${{ needs.deploy.result }}
+          PROD_RESULT: ${{ needs.deploy-production.result }}
+        run: |
+          describe() {
+            case "$1" in
+              success)   echo "completed successfully" ;;
+              failure)   echo "failed, or was rejected at the approval gate" ;;
+              cancelled) echo "was cancelled" ;;
+              skipped)   echo "was skipped" ;;
+              *)         echo "ended with status: $1" ;;
+            esac
+          }
+          close_if_open() {
+            number="$1"; label="$2"; result="$3"
+            [ -z "$number" ] && return 0
+            state=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${{ github.repository }}/issues/$number" | jq -r '.state')
+            [ "$state" = "open" ] || return 0
+            curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               -d "$(jq -n --arg b "The $label deployment $(describe "$result"). Closing this tracking issue automatically." '{body: $b}')"               "https://api.github.com/repos/${{ github.repository }}/issues/$number/comments" > /dev/null
+            curl -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               -d '{"state": "closed"}'               "https://api.github.com/repos/${{ github.repository }}/issues/$number" > /dev/null
+          }
+          close_if_open "$QA_ISSUE" "QA" "$QA_RESULT"
+          close_if_open "$PROD_ISSUE" "production" "$PROD_RESULT"

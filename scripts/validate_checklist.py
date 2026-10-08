@@ -114,7 +114,7 @@ def _reachable_shapes(shapes_by_name, start_shape, identifier=None):
 def check_naming(ctx):
     name = ctx["process_name"]
     ok = re.match(CONFIG["name_pattern"], name) is not None
-    return (PASS if ok else FAIL), f"'{name}' " + ("matches" if ok else "does not match") + " PR_LOAD_[Domain]_[Object]_[Direction]_[Target]"
+    return (PASS if ok else FAIL), f"`{name}` " + ("matches" if ok else "does not match") + " the convention `PR_LOAD_<Domain>_<Object>_<Direction>_<Target>`"
 
 
 def check_labels(ctx):
@@ -471,7 +471,10 @@ def main():
             )
             ctx["executions"] = records
         except Exception as exc:
-            ctx["executions_note"] = f"could not query Dev execution history ({type(exc).__name__}: {exc})"
+            if "do not have access to any containers" in str(exc):
+                ctx["executions_note"] = "no runtime (atom) is attached to the Dev environment, so there is no execution history to check"
+            else:
+                ctx["executions_note"] = f"could not query Dev execution history ({type(exc).__name__}: {exc})"
 
     root = _parse(xml_text)
     if root is None:
@@ -495,11 +498,6 @@ def main():
     report = render_markdown(results, title)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(report)
-
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a", encoding="utf-8") as f:
-            f.write("\n" + report)
 
     for status, key in ((PASS, "passed"), (FAIL, "failed"), (REVIEW, "review")):
         print(f"checklist-{key}={sum(1 for r in results if r['status'] == status)}")
