@@ -7,28 +7,6 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
-      # No package_id here on purpose: the manual path resolves the package
-      # from Dev and runs QA -> production in sequence. The workflow_call
-      # interface below remains for rollback.yml.
-
-  # Lets rollback.yml redeploy an older package through this same workflow,
-  # so a rollback gets the identical tracking-issue / approval-gate /
-  # deployment-record behavior as a normal promotion — no separate,
-  # weaker path for undoing a mistake.
-  workflow_call:
-    inputs:
-      process_name:
-        required: true
-        type: string
-      package_id:
-        required: false
-        type: string
-      target_environment:
-        required: true
-        type: string
-      comment:
-        required: false
-        type: string
 
 concurrency:
   # Keep each process's full QA -> production chain serialized.
@@ -61,17 +39,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # The manual path always takes the package currently deployed in Dev,
-      # read from this repo's own deployment ledger — never an arbitrary
-      # package that was built but never actually deployed there. This is enforced
-      # structurally, not just a default: workflow_dispatch (the human
-      # form above) has no package_id input at all, so `inputs.package_id`
-      # is only ever non-empty when this workflow is invoked via
-      # workflow_call — i.e. by rollback.yml, the one deliberate exception.
-      # resolve_current_package.py has no Boomi-API fallback: if this
-      # process was never actually deployed to the environment below, the
-      # run fails here rather than guessing. See deployments/README.md.
-      - name: Resolve package_id if needed
+      # Resolve the package currently deployed in Dev from this repo's
+      # ledger; do not fall back to Boomi's global latest-package lookup.
+      - name: Resolve current Dev package
         id: resolve
         working-directory: scripts
         env:
@@ -79,27 +49,13 @@ jobs:
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: |
-          if [ -n "${{ inputs.package_id }}" ]; then
-            echo "package-id=${{ inputs.package_id }}" >> "$GITHUB_OUTPUT"
-            # rollback.yml's explicit package_id has no component-id/version
-            # of its own — look them up from our own ledger history (the
-            # same self-heal update_deployment_ledger.py does later, just
-            # surfaced earlier here so the diff step and issue below have
-            # them too, instead of both silently getting blanks).
-            python lookup_ledger_metadata.py --package-id "${{ inputs.package_id }}" >> "$GITHUB_OUTPUT"
-          else
-            source_env="dev"
-            if [ "${{ inputs.target_environment }}" = "prod" ]; then source_env="qa"; fi
-            python resolve_current_package.py --name "${{ inputs.process_name }}" --environment "$source_env" >> "$GITHUB_OUTPUT"
-          fi
+        run: python resolve_current_package.py --name "${{ inputs.process_name }}" --environment dev >> "$GITHUB_OUTPUT"
 
-      # Best-effort, display-only lookup of what's currently in QA before
-      # this promotion.
+      # Best-effort, display-only lookup of what's currently in QA.
       - name: Describe current target-environment state
         id: current
         working-directory: scripts
-        run: python describe_current.py --name "${{ inputs.process_name }}" --environment "${{ inputs.target_environment || 'qa' }}" >> "$GITHUB_OUTPUT"
+        run: python describe_current.py --name "${{ inputs.process_name }}" --environment qa >> "$GITHUB_OUTPUT"
 
       # Structural diff (elements/attributes changed, in plain terms, not
       # raw XML) on top of the version/package-id diff above — see
@@ -134,36 +90,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          target_environment="${{ inputs.target_environment || 'qa' }}"
-          diff_line="$target_environment: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
+          diff_line="qa: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
           if [ "${{ steps.xmldiff.outputs.xml-diff-available }}" = "true" ]; then
             xml_diff_note="See this run's job summary and the process-diff artifact."
           else
             xml_diff_note="Not available for this run (see job summary/logs for why)."
           fi
-          issue_title="Promote ${{ inputs.process_name }} to $target_environment"
+          issue_title="Promote ${{ inputs.process_name }} to qa"
           issue_body=$(cat <<EOF
           Process: ${{ inputs.process_name }}
           Package: ${{ steps.resolve.outputs.package-id }}
           Version: ${{ steps.resolve.outputs.version }}
-          Target: $target_environment
+          Target: qa
           Deployment: $diff_line
           Process diff: $xml_diff_note
 
           Requested by: ${{ github.actor }}
-          Comment: ${{ inputs.comment }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
           )
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" --arg env "$target_environment" '{title: $title, body: $body, labels: ["promote", $env]}')" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "qa"]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
           echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
 
-          echo "## Promote ${{ inputs.process_name }} to $target_environment" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Promote ${{ inputs.process_name }} to QA" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -172,9 +126,7 @@ jobs:
   deploy:
     needs: prepare
     runs-on: ubuntu-latest
-    # The manual workflow targets QA. Calls from rollback.yml retain their
-    # requested target, including production's required-reviewer gate.
-    environment: ${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment || 'qa' }}
+    environment: qa
     steps:
       - uses: actions/checkout@v4
 
@@ -190,7 +142,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          env_name="${{ inputs.target_environment == 'prod' && 'production' || inputs.target_environment || 'qa' }}"
+          env_name="qa"
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -201,7 +153,7 @@ jobs:
           deployment_id=$(echo "$response" | jq -r '.id')
           echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy package to target environment
+      - name: Deploy package to QA
         id: deploy
         working-directory: scripts
         env:
@@ -212,8 +164,8 @@ jobs:
         run: |
           python deploy_component.py \
             --package-id "${{ needs.prepare.outputs.package-id }}" \
-            --env "${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}" \
-            --config "../environments/${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}.json"
+            --env qa \
+            --config "../environments/qa.json"
 
       # Records this promotion into deployments/{ledger,current}.csv and
       # pushes it back to the repo with the run's own GITHUB_TOKEN — GitHub
@@ -228,7 +180,7 @@ jobs:
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: |
-          env_name="${{ inputs.target_environment == 'prod' && 'prod' || inputs.target_environment || 'qa' }}"
+          env_name="qa"
           python scripts/update_deployment_ledger.py \
             --process-name "${{ inputs.process_name }}" \
             --component-id "${{ needs.prepare.outputs.component-id }}" \
@@ -238,7 +190,6 @@ jobs:
             --action promote --status success \
             --requested-by "${{ github.actor }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --comment "${{ inputs.comment }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -25,31 +25,13 @@ scripts/       Python helpers that call the Boomi AtomSphere Platform API
                       push). Requires a version label (e.g. v1.1) — becomes
                       the Boomi package's version and is recorded in the
                       ledger. Records the Dev deploy into deployments/.
-  cd.yml             Manually validate and promote Dev -> QA, then
+  cd.yml             Manually promote Dev -> QA, then
                       automatically promote the same package QA -> PD when
-                      QA succeeds. Checklist can be manually attested,
-                      marked all-pass, or explicitly skipped; failures in
-                      manual mode block both deployments. Production
-                      Environment reviewers, if configured, still gate the
-                      automatic promotion. Also callable by rollback.yml
-                      (workflow_call, the one place an explicit older
-                      package_id is accepted).
-  rollback.yml       Redeploy an older package to Dev, QA, or PD
-                      (workflow_dispatch) — leave package_id blank to
-                      auto-pick the version that was actually live in
-                      that environment before the
-                      current one, from the ledger (fails if there isn't
-                      enough per-environment history yet, rather than
-                      guessing from Boomi's global package list).
+                      QA succeeds. Production Environment reviewers, if
+                      configured, still gate the automatic promotion.
   list-processes.yml  Look up live Boomi processes + their latest package,
                       printed to a job summary. Purely informational —
                       ci.yml/cd.yml resolve process names themselves now.
-  list-packages.yml  Every package (not just latest) for one process, for
-                      picking an older packageId as a rollback target —
-                      annotated with which environment(s) it's actually
-                      been deployed to (and whether it's still current
-                      there), from the deployment ledger.
-  debug-secrets.yml  Prints SHA256 hashes of the Boomi secrets (never values).
 ```
 
 ## Why no custom admin app
@@ -91,14 +73,12 @@ native `workflow_dispatch` flow below is the only supported path.)
      (defaults to `https://api.boomi.com`; use `https://api.platform.gb.boomi.com`
      for EU/GB accounts)
 
-   Use the **"Debug Boomi Secrets"** workflow afterward to sanity-check what
-   got saved, without it ever printing the actual values.
 3. **GitHub Environments** — Settings → Environments → create `dev`, `qa`,
-   and `production` (every workflow references one of these three by name,
+   and `production` (the deploy workflows reference these by name,
    so create all of them even if you don't add reviewers to all of them
    yet). On whichever ones should require approval before that job runs —
    `dev` gates `ci.yml`; `qa` and `production` gate the corresponding
-   deployments in `cd.yml` and `rollback.yml` — add yourself (or whoever
+   deployments in `cd.yml` — add yourself (or whoever
    should approve) as a required reviewer. Every deploy opens its tracking
    issue *before* this gate, with a before → after diff (version/packageId)
    in the issue body and that
@@ -110,7 +90,7 @@ native `workflow_dispatch` flow below is the only supported path.)
    artifact when it succeeds.
 4. **Who can trigger runs** — controlled entirely by GitHub repo access, not
    by anything in this repo: add exactly the people who should be able to
-   dispatch `ci.yml`/`cd.yml`/`rollback.yml` as collaborators (Settings →
+   dispatch `ci.yml`/`cd.yml` as collaborators (Settings →
    Collaborators and teams), and rely on step 3's required reviewers for
    the smaller set who can approve a specific environment's deploys.
 
@@ -137,32 +117,18 @@ deployment ledger, not a raw Boomi lookup.
    separate QA-to-production dispatch. QA and production reviewer gates
    remain in effect if configured; production approval can still pause the
    automatic follow-on job.
-3. **Rollback**: Actions tab → **`rollback.yml`** → Run workflow →
-   `process_name`, `target_environment` (`dev`, `qa`, or `prod` — unlike
-   `cd.yml`, rollback includes `dev`). Leave `package_id` blank and it
-   auto-picks the package that was actually live in that environment just
-   before the current one, read from the deployment ledger with real dates
-   (job summary always prints the table, so you can confirm the choice);
-   fails if there isn't at least two distinct successful deploys of this
-   process to this environment recorded yet, rather than guessing — pass an
-   explicit `package_id` instead (one that's genuinely been live in this
-   environment; check `deployments/ledger.csv` or the job summary from a
-   previous promotion). Goes through the same tracking issue (with the
-   before → after diff), deployment record, ledger update, and required-
-   reviewer approval on the target environment as a normal promotion —
-   including for `dev`, if the `dev` Environment has reviewers configured.
-4. **"List Boomi Processes"** and **component_id** input on `ci.yml`
+3. **"List Boomi Processes"** and **component_id** input on `ci.yml`
    still exist as an explicit override / manual lookup if you ever need
    them (e.g. a component name isn't unique, or you want to double-check
    what resolved), but day-to-day you shouldn't need them.
-5. **Deployment history**: every `ci.yml`/`cd.yml`/`rollback.yml` run also
+4. **Deployment history**: every `ci.yml`/`cd.yml` run also
    posts a native GitHub Deployment record (repo → **Environments** tab),
    so `dev`/`qa`/`production` each show their own history — who, which
    commit, success/failure — alongside the tracking Issues. On top of that,
    a successful deploy is recorded into `deployments/ledger.csv` (full
    history) and `deployments/current.csv` (what's live right now, per
    process+environment) — see `deployments/README.md`. That's what makes
-   the Dev → QA → PD chaining in #2 and the accurate rollback in #3 possible.
+   the Dev → QA → PD chaining in #2 possible.
    Two `cd.yml` runs for the same process can't overlap: the workflow
    serializes the complete QA-to-production chain so a second dispatch
    queues behind the first instead of racing it.

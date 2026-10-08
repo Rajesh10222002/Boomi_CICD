@@ -235,7 +235,7 @@ class BoomiClient:
         return results[0]["componentId"]
 
     def list_packages(self, component_id, limit=20):
-        """All PackagedComponent entries for a componentId, newest first (for picking a rollback target)."""
+        """Return recent PackagedComponent entries for a componentId, newest first."""
         query = {
             "QueryFilter": {
                 "expression": {"operator": "EQUALS", "property": "componentId", "argument": [component_id]}

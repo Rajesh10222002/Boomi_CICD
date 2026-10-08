@@ -9,9 +9,7 @@ responsible for committing/pushing them.
 
 --component-id and --version are optional: if omitted, they're looked up
 from the most recent ledger row that already recorded this same
-package_id (e.g. when rollback.yml redeploys an older package by id, cd.yml
-doesn't know its component_id/version up front — this fills them back in
-from when that package was first built).
+package_id.
 
 Usage:
     python scripts/update_deployment_ledger.py \
