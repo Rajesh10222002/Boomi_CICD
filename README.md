@@ -117,6 +117,14 @@ deployment ledger, not a raw Boomi lookup.
    separate QA-to-production dispatch. QA and production reviewer gates
    remain in effect if configured; production approval can still pause the
    automatic follow-on job.
+
+   Before the QA gate, `scripts/validate_checklist.py` pulls the package's
+   component XML and runs the `checklist.md` items against it. The tracking
+   issue and job summary list each item as PASS, FAIL, or REVIEW (can't be
+   judged from XML — needs a human). Failures don't block the run; the QA
+   reviewer reads the report and approves or rejects. Approving deploys to
+   QA, then production follows (and hits its own gate). Most checks are
+   heuristics over Boomi's process XML — tune `CONFIG` in the script.
 3. **"List Boomi Processes"** and **component_id** input on `ci.yml`
    still exist as an explicit override / manual lookup if you ever need
    them (e.g. a component name isn't unique, or you want to double-check

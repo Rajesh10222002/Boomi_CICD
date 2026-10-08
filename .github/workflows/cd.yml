@@ -85,6 +85,32 @@ jobs:
           name: process-diff
           path: component_diff.txt
 
+      # Checklist validation (checklist.md) against the package's component
+      # XML. Never fails the run: results (pass / fail / needs-review) go in
+      # the job summary and tracking issue so the QA reviewer decides.
+      - name: Validate checklist
+        id: checklist
+        continue-on-error: true
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          python validate_checklist.py \
+            --process-name "${{ inputs.process_name }}" \
+            --component-id "${{ steps.resolve.outputs.component-id }}" \
+            --package-id "${{ steps.resolve.outputs.package-id }}" \
+            --out ../checklist_report.md >> "$GITHUB_OUTPUT"
+
+      - name: Upload checklist report
+        if: steps.checklist.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checklist-report
+          path: checklist_report.md
+
       - name: Create tracking issue
         id: create_issue
         env:
@@ -95,6 +121,11 @@ jobs:
             xml_diff_note="See this run's job summary and the process-diff artifact."
           else
             xml_diff_note="Not available for this run (see job summary/logs for why)."
+          fi
+          if [ "${{ steps.checklist.outcome }}" = "success" ]; then
+            checklist_md=$(cat checklist_report.md)
+          else
+            checklist_md="Checklist validation did not run (see the run logs) — review manually."
           fi
           issue_title="Promote ${{ inputs.process_name }} to qa"
           issue_body=$(cat <<EOF
@@ -107,6 +138,10 @@ jobs:
 
           Requested by: ${{ github.actor }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          $checklist_md
+
+          **Reviewer:** check the failed / needs-review items above, then approve or reject the QA deployment in the run's "Review deployments" prompt.
           EOF
           )
           response=$(curl -s -X POST \
