@@ -57,6 +57,42 @@ jobs:
         working-directory: scripts
         run: python describe_current.py --name "${{ inputs.process_name }}" --environment qa >> "$GITHUB_OUTPUT"
 
+      # Checklist validation (checklist.md) against the package's component
+      # XML. Never fails the run: results (pass / fail / needs-review) go in
+      # the job summary and tracking issue so the QA reviewer decides.
+      - name: Validate checklist
+        id: checklist
+        continue-on-error: true
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          python validate_checklist.py \
+            --process-name "${{ inputs.process_name }}" \
+            --component-id "${{ steps.resolve.outputs.component-id }}" \
+            --package-id "${{ steps.resolve.outputs.package-id }}" \
+            --out ../checklist_report.md >> "$GITHUB_OUTPUT"
+
+      - name: Upload checklist report
+        if: steps.checklist.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checklist-report
+          path: checklist_report.md
+
+      # First thing in the job summary, so the approver sees the checklist
+      # result before anything else on the run page.
+      - name: Show checklist in job summary
+        run: |
+          if [ "${{ steps.checklist.outcome }}" = "success" ]; then
+            cat checklist_report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> ⚠️ Checklist validation did not run — review manually." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # Structural diff (elements/attributes changed, in plain terms, not
       # raw XML) on top of the version/package-id diff above — see
       # diff_component_versions.py. Non-fatal: degrades to
@@ -84,32 +120,6 @@ jobs:
         with:
           name: process-diff
           path: component_diff.txt
-
-      # Checklist validation (checklist.md) against the package's component
-      # XML. Never fails the run: results (pass / fail / needs-review) go in
-      # the job summary and tracking issue so the QA reviewer decides.
-      - name: Validate checklist
-        id: checklist
-        continue-on-error: true
-        working-directory: scripts
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: |
-          python validate_checklist.py \
-            --process-name "${{ inputs.process_name }}" \
-            --component-id "${{ steps.resolve.outputs.component-id }}" \
-            --package-id "${{ steps.resolve.outputs.package-id }}" \
-            --out ../checklist_report.md >> "$GITHUB_OUTPUT"
-
-      - name: Upload checklist report
-        if: steps.checklist.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: checklist-report
-          path: checklist_report.md
 
       - name: Create tracking issue
         id: create_issue
@@ -157,13 +167,6 @@ jobs:
           echo "$diff_line" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.checklist.outcome }}" = "success" ]; then
-            cat checklist_report.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "> ⚠️ Checklist validation did not run — review manually." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
   deploy:
     needs: prepare
