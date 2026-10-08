@@ -158,6 +158,13 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Tracking issue: #$issue_number" >> "$GITHUB_STEP_SUMMARY"
 
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.checklist.outcome }}" = "success" ]; then
+            cat checklist_report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> ⚠️ Checklist validation did not run — review manually." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   deploy:
     needs: prepare
     runs-on: ubuntu-latest

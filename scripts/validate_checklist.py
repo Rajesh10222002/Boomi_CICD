@@ -19,8 +19,8 @@ such as catchAll/retryCount/allowSimultaneous, shape dragpoints), so each
 result names the evidence it saw. Tune the thresholds/patterns in CONFIG.
 
 Prints `checklist-passed=`, `checklist-failed=`, `checklist-review=` and
-`checklist-report=<path>` for $GITHUB_OUTPUT, and appends the report to
-$GITHUB_STEP_SUMMARY when set.
+`checklist-report=<path>` for $GITHUB_OUTPUT. The report is a markdown file the
+workflow appends to the job summary.
 
 Usage:
     python scripts/validate_checklist.py --process-name "PR_LOAD_..." --component-id X --package-id P
@@ -357,25 +357,64 @@ def run_checklist(ctx):
     return results
 
 
+def _table(rows, head=("Section", "Checklist item", "Finding")):
+    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for r in rows:
+        ev = r["evidence"].replace("|", "\|")
+        out.append(f"| {r['section']} | {r['item']} | {ev} |")
+    return out
+
+
 def render_markdown(results, title):
-    counts = {s: sum(1 for r in results if r["status"] == s) for s in (PASS, FAIL, REVIEW)}
+    by = {s: [r for r in results if r["status"] == s] for s in (PASS, FAIL, REVIEW)}
+    total = len(results)
+    if by[FAIL]:
+        verdict = f"> ## ❌ {len(by[FAIL])} checklist item(s) failed — reviewer decision required"
+    elif by[REVIEW]:
+        verdict = "> ## 🔎 No automated failures — manual review items remain"
+    else:
+        verdict = "> ## ✅ All checklist items passed"
+    filled = round(10 * len(by[PASS]) / total) if total else 0
+    bar = "🟩" * filled + "⬜" * (10 - filled)
+
     lines = [
-        f"### Checklist validation — {title}",
+        "## 🧾 Pre-QA Checklist Validation",
         "",
-        f"{ICON[PASS]} **{counts[PASS]} passed** · {ICON[FAIL]} **{counts[FAIL]} failed** · "
-        f"{ICON[REVIEW]} **{counts[REVIEW]} need your review**",
+        f"**Subject:** {title}",
         "",
+        verdict,
+        "",
+        f"{bar} **{len(by[PASS])} of {total}** items passed",
+        "",
+        "| ✅ Passed | ❌ Failed | 🔎 Needs review | Total |",
+        "|:-:|:-:|:-:|:-:|",
+        f"| {len(by[PASS])} | {len(by[FAIL])} | {len(by[REVIEW])} | {total} |",
+        "",
+        "### Results by section",
+        "",
+        "| Section | ✅ | ❌ | 🔎 | Status |",
+        "|---|:-:|:-:|:-:|:-:|",
     ]
-    section = None
-    for r in results:
-        if r["section"] != section:
-            section = r["section"]
-            lines += ["", f"**{section}**", "", "| | Item | Evidence |", "|---|---|---|"]
-        ev = r["evidence"].replace("|", "\\|")
-        lines.append(f"| {ICON[r['status']]} {r['status']} | {r['item']} | {ev} |")
+    for sec in dict.fromkeys(r["section"] for r in results):
+        rs = [r for r in results if r["section"] == sec]
+        p_ = sum(r["status"] == PASS for r in rs)
+        f_ = sum(r["status"] == FAIL for r in rs)
+        v_ = sum(r["status"] == REVIEW for r in rs)
+        icon = ICON[FAIL] if f_ else ICON[REVIEW] if v_ else ICON[PASS]
+        lines.append(f"| {sec} | {p_} | {f_} | {v_} | {icon} |")
+
+    if by[FAIL]:
+        lines += ["", "### ❌ Failed — needs attention", ""] + _table(by[FAIL])
+    if by[REVIEW]:
+        lines += ["", "### 🔎 Needs reviewer judgement", ""] + _table(by[REVIEW])
+    if by[PASS]:
+        lines += ["", f"<details><summary><b>✅ Passed ({len(by[PASS])})</b></summary>", ""]
+        lines += _table(by[PASS]) + ["", "</details>"]
     lines += [
         "",
-        "_FAIL/REVIEW items don't block the run — the reviewer at the environment gate decides whether to approve._",
+        "---",
+        "_Failed and review items do not block the run. The reviewer decides at the "
+        "**Review pending deployments** prompt whether to approve the QA deployment._",
     ]
     return "\n".join(lines) + "\n"
 
