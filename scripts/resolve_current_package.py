@@ -12,9 +12,12 @@ label from deployments/ledger.csv. Either way, only ever resolves to
 something the ledger recorded as actually deployed to that environment —
 never an arbitrary "latest built" guess.
 
-Fails if there's no matching row: a process (or a specific version of it)
-can only be promoted from an environment it's actually been deployed to,
-Dev -> QA -> PD. That's the point, not a bug.
+If the ledger has no current row, falls back to asking Boomi what is
+actually deployed in that environment (live_deployment.py) — so a process
+deployed by hand in the Boomi UI can still be promoted. Fails if neither
+the ledger nor Boomi has it deployed there: a process can only be promoted
+from an environment it's actually deployed to, Dev -> QA -> PD. That's the
+point, not a bug. (--version still resolves from the ledger only.)
 
 Prints `package-id=<id>`, `component-id=<id>`, and `version=<value>`
 (nothing else) so a workflow step can capture all three into
@@ -28,6 +31,7 @@ Usage:
 import argparse
 import csv
 import os
+import sys
 
 _HERE = os.path.dirname(__file__)
 CURRENT_PATH = os.path.join(_HERE, "..", "deployments", "current.csv")
@@ -78,9 +82,20 @@ def main():
     else:
         result = _resolve_current(args.name, args.environment)
         if result is None:
+            from live_deployment import lookup
+
+            live = lookup(args.name, args.environment)
+            if live:
+                result = live[:3]
+                print(
+                    f"'{args.name}' isn't in deployments/current.csv for '{args.environment}', but Boomi "
+                    f"reports package {live[0]} ({live[2] or 'no version'}) deployed there — using that.",
+                    file=sys.stderr,
+                )
+        if result is None:
             raise SystemExit(
                 f"'{args.name}' has never been successfully deployed to '{args.environment}' "
-                f"(no row in deployments/current.csv) — promote it there first before promoting further."
+                f"(not in deployments/current.csv, and Boomi shows no active deployment there either) — deploy it there first."
             )
 
     package_id, component_id, version = result

@@ -127,6 +127,33 @@ class BoomiClient:
         resp = self._request("POST", self._url("DeployedPackage"), json=body)
         return resp.json()["deploymentId"]
 
+    def find_deployed_package(self, component_id, environment_id):
+        """
+        What Boomi itself says is live for a component in an environment
+        (the active DeployedPackage), regardless of how it got there —
+        including deploys done by hand in the Boomi UI that this repo's
+        ledger never saw. Returns {packageId, packageVersion, deployedDate,
+        deployedBy} for the most recent active deployment, or None.
+        """
+        query = {
+            "QueryFilter": {
+                "expression": {
+                    "operator": "and",
+                    "nestedExpression": [
+                        {"argument": [component_id], "operator": "EQUALS", "property": "componentId"},
+                        {"argument": [environment_id], "operator": "EQUALS", "property": "environmentId"},
+                        {"argument": ["true"], "operator": "EQUALS", "property": "active"},
+                    ],
+                }
+            }
+        }
+        resp = self._request("POST", self._url("DeployedPackage", "query"), json=query)
+        results = resp.json().get("result", [])
+        if not results:
+            return None
+        results.sort(key=lambda r: r.get("deployedDate", ""), reverse=True)
+        return results[0]
+
     def get_execution_record(self, execution_id):
         """Read one Execution Record (process run) by id."""
         resp = self._request("GET", self._url("ExecutionRecord", "async", execution_id))

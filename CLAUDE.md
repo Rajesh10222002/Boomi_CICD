@@ -72,10 +72,11 @@ isn't filled in yet, ask rather than inventing a value:
   step does the `git commit`/`push`. See `deployments/README.md`.
 - `scripts/resolve_current_package.py` — for `cd.yml`: resolves
   `process_name` + `--environment` to the packageId/componentId/version
-  `deployments/current.csv` says is live there right now. Deliberately has
-  **no fallback** to Boomi's "latest ever packaged" lookup (the old
-  `resolve_latest_package.py`, since removed) — if there's no ledger row,
-  it hard-fails. That's the enforcement mechanism for "a process can only
+  `deployments/current.csv` says is live there right now. No fallback to Boomi's "latest ever packaged" lookup (the old
+  `resolve_latest_package.py`, since removed) — if there's no ledger row, it falls back to Boomi's *actual* active
+  deployment in that environment (`live_deployment.py` /
+  `BoomiClient.find_deployed_package()`), so a process deployed by hand in
+  the Boomi UI can still be promoted; it hard-fails only if neither has it. That's the enforcement mechanism for "a process can only
   be promoted from an environment it's actually been deployed to."
 - `scripts/describe_current.py` — display-only (never used for a
   control-flow decision, unlike `resolve_current_package.py`): prints a

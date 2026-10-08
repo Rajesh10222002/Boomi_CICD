@@ -38,6 +38,18 @@ def main():
                     print(f"current-package-id={row['package_id']}")
                     return
 
+    from live_deployment import lookup
+
+    live = lookup(args.name, args.environment)
+    if live:
+        package_id, _, version, deployed_at, deployed_by = live
+        print(
+            f"current={version or '(no version label)'} — package {package_id}, deployed {deployed_at}"
+            f"{' by ' + deployed_by if deployed_by else ''} (deployed outside the pipeline, per Boomi)"
+        )
+        print(f"current-package-id={package_id}")
+        return
+
     print("current=(nothing deployed yet)")
     print("current-package-id=")
 

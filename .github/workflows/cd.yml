@@ -55,6 +55,11 @@ jobs:
       - name: Describe current target-environment state
         id: current
         working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python describe_current.py --name "${{ inputs.process_name }}" --environment qa >> "$GITHUB_OUTPUT"
 
       - name: Summary - promotion request
@@ -323,6 +328,11 @@ jobs:
       - name: Describe current production state
         id: current
         working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python describe_current.py --name "${{ inputs.process_name }}" --environment prod >> "$GITHUB_OUTPUT"
 
       - name: Create production tracking issue
