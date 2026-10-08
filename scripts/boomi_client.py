@@ -132,27 +132,39 @@ class BoomiClient:
         What Boomi itself says is live for a component in an environment
         (the active DeployedPackage), regardless of how it got there —
         including deploys done by hand in the Boomi UI that this repo's
-        ledger never saw. Returns {packageId, packageVersion, deployedDate,
-        deployedBy} for the most recent active deployment, or None.
+        ledger never saw. Returns the most recent matching DeployedPackage
+        dict (packageId, packageVersion, deployedDate, deployedBy, ...), or
+        None.
+
+        Queries by environment only (the one filter every account
+        supports) and matches componentId client-side, paging through
+        queryMore, rather than relying on server-side componentId/active
+        filters.
         """
         query = {
             "QueryFilter": {
-                "expression": {
-                    "operator": "and",
-                    "nestedExpression": [
-                        {"argument": [component_id], "operator": "EQUALS", "property": "componentId"},
-                        {"argument": [environment_id], "operator": "EQUALS", "property": "environmentId"},
-                        {"argument": ["true"], "operator": "EQUALS", "property": "active"},
-                    ],
-                }
+                "expression": {"operator": "EQUALS", "property": "environmentId", "argument": [environment_id]}
             }
         }
         resp = self._request("POST", self._url("DeployedPackage", "query"), json=query)
-        results = resp.json().get("result", [])
-        if not results:
+        data = resp.json()
+        results = list(data.get("result", []))
+        token = data.get("queryToken")
+        while token:
+            resp = self._request(
+                "POST", self._url("DeployedPackage", "queryMore"), data=token, headers={"Content-Type": "text/plain"}
+            )
+            data = resp.json()
+            results.extend(data.get("result", []))
+            token = data.get("queryToken")
+        matches = [
+            r for r in results
+            if r.get("componentId") == component_id and str(r.get("active", True)).lower() != "false"
+        ]
+        if not matches:
             return None
-        results.sort(key=lambda r: r.get("deployedDate", ""), reverse=True)
-        return results[0]
+        matches.sort(key=lambda r: r.get("deployedDate", ""), reverse=True)
+        return matches[0]
 
     def get_execution_record(self, execution_id):
         """Read one Execution Record (process run) by id."""

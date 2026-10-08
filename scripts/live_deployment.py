@@ -7,6 +7,7 @@ only consulted when it has nothing for a process+environment.
 
 import json
 import os
+import sys
 
 from boomi_client import BoomiClient
 
@@ -24,9 +25,11 @@ def lookup(name, environment):
         client = BoomiClient()
         component_id = client.find_component_by_name(name)
         dep = client.find_deployed_package(component_id, _environment_id(environment))
-    except Exception:
+    except Exception as exc:
+        print(f"Boomi live-deployment lookup failed for '{name}' in {environment}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return None
     if not dep:
+        print(f"Boomi reports no active deployment of '{name}' ({component_id}) in {environment}.", file=sys.stderr)
         return None
     return (
         dep.get("packageId", ""),
