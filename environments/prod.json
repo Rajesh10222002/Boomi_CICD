@@ -1,7 +1,7 @@
 {
   "_comment": "PD (production) environment config. Promotions into this environment_id go through the GitHub 'production' Environment's required-reviewer gate, if one is configured. atom_id is still a placeholder: the trial account's PD environment shows 0 runtimes, so there's no atom to attach yet.",
-  "environment_id": "b33e4642-b3c4-4583-968e-6bba624b77aa",
-  "atom_id": "REPLACE-WITH-PD-ATOM-ID",
+  "environment_id": "5481aeec-4af7-4810-b853-4fdba0bcc4dd",
+  "atom_id": "cafc5c89-69f6-4afc-b532-69093cd94fae",
   "extensions": {
     "example_connection_url": "https://pd.example.internal/api"
   }
