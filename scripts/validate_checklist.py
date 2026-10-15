@@ -181,6 +181,11 @@ def check_subprocess_dependencies(ctx):
             bad.append(
                 f"{label} version differs: {source}={src.get('packageVersion')} vs {target}={tgt.get('packageVersion')}"
             )
+    for env in ctx.get("extra_envs", ()):
+        missing = [f"'{s['name']}'" for cid, s in subs.items()
+                   if cid in ctx["sub_deployments"] and ctx["sub_deployments"][cid].get(env) is None]
+        if missing:
+            notes.append(f"not yet deployed in {env} (needed before promotion there): " + ", ".join(missing))
     if bad:
         return FAIL, "; ".join(bad)
     if notes:
@@ -396,39 +401,27 @@ CHECKLIST = [
 ]
 
 
-# Checks that make sense on a sub-process alone. Naming (PR_LOAD_ convention),
-# try/catch, notifications, dead-letter, retry and test-evidence are the parent's
-# job; a sub-process is allowed to let errors propagate to its caller.
-SUBPROCESS_CHECKS = [
-    ("All shapes are labelled", check_labels),
-    ("Credentials not hardcoded", check_no_hardcoded_credentials),
-    ("Scripting minimal and commented", check_scripting),
-    ("Document / dynamic properties not overloaded", check_dynamic_properties),
-    ("No test data or test-only shapes", check_test_artifacts),
-]
-
-
 def run_subprocess_checks(ctx):
+    """The full checklist, run again on every sub-process (same rules as the parent)."""
     results = []
     for sub in ctx["subprocesses"].values():
-        section = f"Sub-process: {sub['name']}"
         if sub.get("error"):
-            results.append({"section": section, "item": "Definition fetched", "status": FAIL, "evidence": sub["error"]})
+            results.append({"section": f"Sub-process: {sub['name']}", "item": "Definition fetched",
+                            "status": FAIL, "evidence": sub["error"]})
             continue
         sub_ctx = dict(ctx, root=sub["root"], map_roots=sub["map_roots"], map_ids=sub["map_ids"],
-                       process_name=sub["name"])
-        for item, fn in SUBPROCESS_CHECKS:
-            try:
-                status, evidence = fn(sub_ctx)
-            except Exception as exc:
-                status, evidence = REVIEW, f"check errored ({type(exc).__name__}: {exc})"
-            results.append({"section": section, "item": item, "status": status, "evidence": evidence})
+                       process_name=sub["name"], executions=sub["executions"],
+                       executions_note=sub["executions_note"])
+        for r in _run_items(sub_ctx):
+            results.append(dict(r, section=f"Sub-process {sub['name']} / {r['section']}"))
     return results
 
 
-def run_checklist(ctx):
+def _run_items(ctx):
     results = []
     for section, item, fn in CHECKLIST:
+        if fn is check_subprocess_dependencies and ctx.get("is_subprocess"):
+            continue  # dependency state is evaluated once, on the parent
         if fn is None:
             status, evidence = REVIEW, MANUAL_ITEMS.get(item, "needs human review")
         else:
@@ -437,7 +430,11 @@ def run_checklist(ctx):
             except Exception as exc:  # a broken heuristic must not hide the other results
                 status, evidence = REVIEW, f"check errored ({type(exc).__name__}: {exc})"
         results.append({"section": section, "item": item, "status": status, "evidence": evidence})
-    return results + run_subprocess_checks(ctx)
+    return results
+
+
+def run_checklist(ctx):
+    return _run_items(ctx) + run_subprocess_checks(dict(ctx, is_subprocess=True))
 
 
 def _table(rows, head=("Section", "Checklist item", "Finding")):
@@ -553,7 +550,19 @@ def _fetch_subprocess_xml(client, cid, source_dep):
     return client.get_component_xml(cid)
 
 
-def load_subprocesses(root, client, source_env, target_env):
+def _query_dev_executions(client, component_id):
+    """(records|None, note) — Dev execution history for one component."""
+    try:
+        return client.query_execution_records(
+            component_id, _load_dev_env_id(), limit=CONFIG["execution_sample"]
+        ), ""
+    except Exception as exc:
+        if "do not have access to any containers" in str(exc):
+            return None, "no runtime (atom) is attached to the Dev environment, so there is no execution history to check"
+        return None, f"could not query Dev execution history ({type(exc).__name__}: {exc})"
+
+
+def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
     """Follow process calls recursively. Returns ({cid: info}, {cid: {env: deployment|None}})."""
     subs, deployments, env_cache = {}, {}, {}
 
@@ -571,9 +580,10 @@ def load_subprocesses(root, client, source_env, target_env):
         if cid in subs:  # also guards against call cycles
             continue
         info = {"name": cid, "depth": depth, "map_roots": {}, "map_ids": set()}
+        info["executions"], info["executions_note"] = _query_dev_executions(client, cid)
         subs[cid] = info
         try:
-            deployments[cid] = {env: find(env, cid) for env in (source_env, target_env)}
+            deployments[cid] = {env: find(env, cid) for env in (source_env, target_env, *extra_envs)}
         except Exception as exc:
             print(f"Could not read deployments for sub-process {cid}: {exc}", file=sys.stderr)
         try:
@@ -603,13 +613,15 @@ def main():
     parser.add_argument("--xml-file", default="", help="offline: validate this XML file instead of calling Boomi")
     parser.add_argument("--source-environment", default="dev", help="environment the package is promoted from")
     parser.add_argument("--target-environment", default="qa", help="environment the package is promoted to")
+    parser.add_argument("--also-check-environment", action="append", default=[],
+                        help="further environment(s) the package will reach next (e.g. prod); sub-processes missing there are flagged for review")
     parser.add_argument("--out", default="checklist_report.md")
     args = parser.parse_args()
 
     ctx = {"process_name": args.process_name, "map_roots": {}, "map_ids": set(),
            "executions": None, "executions_note": "execution history not queried (offline run)",
            "subprocesses": {}, "sub_deployments": {}, "source_env": args.source_environment,
-           "target_env": args.target_environment}
+           "target_env": args.target_environment, "extra_envs": args.also_check_environment}
     client = None
 
     if args.xml_file:
@@ -632,16 +644,9 @@ def main():
         xml_text = client.get_component_xml(args.component_id, version=version)
         title = f"{args.process_name} (package {args.package_id}, component v{version})"
 
-        try:
-            records = client.query_execution_records(
-                args.component_id, _load_dev_env_id(), limit=CONFIG["execution_sample"]
-            )
-            ctx["executions"] = records
-        except Exception as exc:
-            if "do not have access to any containers" in str(exc):
-                ctx["executions_note"] = "no runtime (atom) is attached to the Dev environment, so there is no execution history to check"
-            else:
-                ctx["executions_note"] = f"could not query Dev execution history ({type(exc).__name__}: {exc})"
+        ctx["executions"], note = _query_dev_executions(client, args.component_id)
+        if note:
+            ctx["executions_note"] = note
 
     root = _parse(xml_text)
     if root is None:
@@ -651,7 +656,7 @@ def main():
     _collect_maps(root, client, ctx["map_roots"], ctx["map_ids"])
     if client is not None:
         ctx["subprocesses"], ctx["sub_deployments"] = load_subprocesses(
-            root, client, args.source_environment, args.target_environment
+            root, client, args.source_environment, args.target_environment, args.also_check_environment
         )
     elif _subprocess_calls(root):
         ctx["subprocess_note"] = f"{len(_subprocess_calls(root))} sub-process call(s) found but not fetched (offline run)"
