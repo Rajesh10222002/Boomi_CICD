@@ -159,12 +159,22 @@ def _subprocess_calls(root):
 def _call_sites(root, owner):
     """{componentId: ["<owner> / <shape name> (<label>)", ...]} for every process-call shape."""
     sites = {}
+    by_name = {sh.attrib.get("name"): sh for sh in _shapes(root)}
+    start = next((sh for sh in by_name.values() if _shape_type(sh) == "start"), None)
+    reachable = _reachable_shapes(by_name, start) if start is not None else None
     for shape in _shapes(root):
         for el in shape.iter():
             if _tag(el) == "processcall" and el.attrib.get("processId"):
-                label = _label(shape)
+                label, name = _label(shape), shape.attrib.get("name", "?")
+                pos = f"x={shape.attrib.get('x', '?')}, y={shape.attrib.get('y', '?')}"
+                if reachable is None:
+                    flow = "no Start shape found"
+                elif name in reachable:
+                    flow = "connected to Start"
+                else:
+                    flow = "NOT connected to Start — orphan/hidden shape"
                 sites.setdefault(el.attrib["processId"], []).append(
-                    f"{owner} / shape '{shape.attrib.get('name', '?')}'" + (f" ('{label}')" if label else "")
+                    f"{owner} / shape '{name}'" + (f" ('{label}')" if label else "") + f" ({pos}; {flow})"
                 )
     return sites
 
@@ -178,7 +188,7 @@ def check_subprocess_dependencies(ctx):
     target, source = ctx["target_env"], ctx["source_env"]
     bad, notes = [], []
     for cid, sub in subs.items():
-        label = f"'{sub['name']}' [called from {'; '.join(sub.get('called_from', [])) or '?'}]"
+        label = f"'{sub['name']}'"
         if sub.get("error"):
             bad.append(f"{label} ({cid}) could not be fetched: {sub['error']}")
             continue
@@ -199,13 +209,14 @@ def check_subprocess_dependencies(ctx):
                    if cid in ctx["sub_deployments"] and ctx["sub_deployments"][cid].get(env) is None]
         if missing:
             notes.append(f"not yet deployed in {env} (needed before promotion there): " + ", ".join(missing))
-    if bad:
-        return FAIL, "; ".join(bad)
-    if notes:
-        return REVIEW, "; ".join(notes)
-    return PASS, f"{len(subs)} sub-process(es), all deployed in {target} at the {source} version: " + ", ".join(
-        f"'{s['name']}' [called from {'; '.join(s.get('called_from', []))}]" for s in subs.values()
+    sites = " | Call sites: " + "; ".join(
+        f"'{s['name']}' <- {', '.join(s.get('called_from', [])) or '?'}" for s in subs.values()
     )
+    if bad:
+        return FAIL, "; ".join(bad) + sites
+    if notes:
+        return REVIEW, "; ".join(notes) + sites
+    return PASS, f"{len(subs)} sub-process(es), all deployed in {target} at the {source} version" + sites
 
 
 def check_description(ctx):
