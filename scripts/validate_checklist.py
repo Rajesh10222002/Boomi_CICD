@@ -156,6 +156,19 @@ def _subprocess_calls(root):
     return list(dict.fromkeys(ids))
 
 
+def _call_sites(root, owner):
+    """{componentId: ["<owner> / <shape name> (<label>)", ...]} for every process-call shape."""
+    sites = {}
+    for shape in _shapes(root):
+        for el in shape.iter():
+            if _tag(el) == "processcall" and el.attrib.get("processId"):
+                label = _label(shape)
+                sites.setdefault(el.attrib["processId"], []).append(
+                    f"{owner} / shape '{shape.attrib.get('name', '?')}'" + (f" ('{label}')" if label else "")
+                )
+    return sites
+
+
 def check_subprocess_dependencies(ctx):
     subs = ctx["subprocesses"]
     if not subs:
@@ -165,7 +178,7 @@ def check_subprocess_dependencies(ctx):
     target, source = ctx["target_env"], ctx["source_env"]
     bad, notes = [], []
     for cid, sub in subs.items():
-        label = f"'{sub['name']}'"
+        label = f"'{sub['name']}' [called from {'; '.join(sub.get('called_from', [])) or '?'}]"
         if sub.get("error"):
             bad.append(f"{label} ({cid}) could not be fetched: {sub['error']}")
             continue
@@ -191,7 +204,7 @@ def check_subprocess_dependencies(ctx):
     if notes:
         return REVIEW, "; ".join(notes)
     return PASS, f"{len(subs)} sub-process(es), all deployed in {target} at the {source} version: " + ", ".join(
-        f"'{s['name']}'" for s in subs.values()
+        f"'{s['name']}' [called from {'; '.join(s.get('called_from', []))}]" for s in subs.values()
     )
 
 
@@ -635,12 +648,13 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         recs.sort(key=lambda r: r.get("deployedDate", ""), reverse=True)
         return recs[0] if recs else None
 
-    queue = deque((cid, 1) for cid in _subprocess_calls(root))
+    parent_name = root.attrib.get("name") or "parent"
+    queue = deque((cid, 1, sites) for cid, sites in _call_sites(root, parent_name).items())
     while queue:
-        cid, depth = queue.popleft()
+        cid, depth, sites = queue.popleft()
         if cid in subs:  # also guards against call cycles
             continue
-        info = {"name": cid, "depth": depth, "map_roots": {}, "map_ids": set()}
+        info = {"name": cid, "depth": depth, "map_roots": {}, "map_ids": set(), "called_from": sites}
         info["executions"], info["executions_note"] = _query_dev_executions(client, cid)
         subs[cid] = info
         try:
@@ -657,9 +671,9 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         info["root"] = sub_root
         info["name"] = sub_root.attrib.get("name") or cid
         _collect_maps(sub_root, client, info["map_roots"], info["map_ids"])
-        nested = _subprocess_calls(sub_root)
+        nested = _call_sites(sub_root, info["name"])
         if depth < CONFIG["max_subprocess_depth"]:
-            queue.extend((c, depth + 1) for c in nested)
+            queue.extend((c, depth + 1, sites) for c, sites in nested.items())
         elif nested:
             print(f"Sub-process '{info['name']}' calls further sub-processes beyond depth "
                   f"{CONFIG['max_subprocess_depth']}; not followed.", file=sys.stderr)
