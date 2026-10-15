@@ -401,20 +401,65 @@ CHECKLIST = [
 ]
 
 
-def run_subprocess_checks(ctx):
-    """The full checklist, run again on every sub-process (same rules as the parent)."""
-    results = []
-    for sub in ctx["subprocesses"].values():
-        if sub.get("error"):
-            results.append({"section": f"Sub-process: {sub['name']}", "item": "Definition fetched",
-                            "status": FAIL, "evidence": sub["error"]})
-            continue
-        sub_ctx = dict(ctx, root=sub["root"], map_roots=sub["map_roots"], map_ids=sub["map_ids"],
-                       process_name=sub["name"], executions=sub["executions"],
-                       executions_note=sub["executions_note"])
-        for r in _run_items(sub_ctx):
-            results.append(dict(r, section=f"Sub-process {sub['name']} / {r['section']}"))
-    return results
+# How each checklist item is validated — shown at the end of the report.
+# "Auto" = decided from the process XML / Boomi API; "Manual" = always left to the reviewer.
+HOW_VALIDATED = {
+    "Process name follows naming convention":
+        ("Auto", "Process name matched against the regex `PR_LOAD_<Domain>_<Object>_<Direction>_<Target>` (CONFIG name_pattern)."),
+    "All shapes are labelled — no unnamed connectors or maps":
+        ("Auto", "Every `shape` in the XML except start/stop/returndocuments must have a non-empty `userlabel`."),
+    "Sub-processes used appropriately for reusable logic":
+        ("Auto", "Counts process-call shapes. PASS if any exist or the process has ≤ 25 shapes; FAIL if > 25 shapes and no sub-process call."),
+    "Sub-processes deployed in the target environment (and themselves checked)":
+        ("Auto", "Each `processcall/@processId` is followed (recursively). It is fetched at the version deployed in the source env, "
+                 "must have an active deployment in the target env at the same version (FAIL otherwise), and is flagged for review if missing in the next env (prod). "
+                 "Each sub-process then gets its own full checklist below."),
+    "Process notes / description populated":
+        ("Auto", "Component `description` element/attribute must be non-empty."),
+    "Shared / reused connections — no duplicates":
+        ("Manual", "Duplication is across components, not visible in one process's XML."),
+    "Credentials in connection extensions, not hardcoded":
+        ("Auto", "Scans every attribute/element whose name looks like password/secret/token/api-key/authorization for a literal value, "
+                 "and text for literal `Bearer`/`Basic` headers. Values starting with `{` or `$` (variables) are allowed."),
+    "Connector operations not reused across unrelated contexts":
+        ("Manual", "Needs a cross-process usage search."),
+    "Maps are clean — no orphaned fields":
+        ("Manual", "Needs profile-vs-map field analysis."),
+    "Scripting in maps minimal and commented":
+        ("Auto", "Fetches each referenced map and the process's own scripts; FAIL if a script is > 30 non-blank lines or has no comments. "
+                 "REVIEW if maps were referenced but could not be fetched."),
+    "Document / dynamic properties not overloaded":
+        ("Auto", "Counts document-property and dynamic-process-property settings; FAIL if > 20."),
+    "No sensitive data in process logs or document cache":
+        ("Manual", "Depends on data content, not structure."),
+    "Try/Catch captures all error types, not just document-level":
+        ("Auto", "Needs a Try/Catch shape with `catchAll=true`; FAIL if none or catch-all is off."),
+    "Error notifications configured (email / Slack webhook)":
+        ("Auto", "PASS if a Notify shape exists; REVIEW if only an email/HTTP/Slack/Teams connector call exists; FAIL if neither."),
+    "Failed documents go to a dead-letter path / DB":
+        ("Auto", "Follows the Try/Catch `error` branch; REVIEW if it reaches a connector call (reviewer confirms it persists failures), FAIL if it reaches none or there is no Try/Catch."),
+    "Retry logic for transient / timeout failures":
+        ("Auto", "Needs a Try/Catch with `retryCount` > 0."),
+    "Error messages include sufficient context":
+        ("Manual", "Message wording is free text."),
+    "Batch processing — no unnecessary single-document loops":
+        ("Manual", "Depends on data volumes / intent."),
+    "Document caching used appropriately":
+        ("Manual", "Depends on runtime behaviour."),
+    "Scheduled processes do not overlap":
+        ("Auto + Manual", "FAIL if `allowSimultaneous=true`; otherwise REVIEW because the schedule window is set on the atom."),
+    "Process tested in Dev with representative data":
+        ("Auto", "Last 50 Dev execution records for this component (parent and each sub-process separately); needs ≥ 1 COMPLETE. "
+                 "REVIEW if Dev has no runtime attached or the history can't be read."),
+    "Happy path and error path both tested":
+        ("Auto", "Same Dev execution records: needs both a COMPLETE and an ERROR/ABORTED run."),
+    "Test logs / screenshots attached or referenced":
+        ("Manual", "Evidence lives outside Boomi."),
+    "No test data or test-only shapes left in the process":
+        ("Auto", "No shape label may contain test/debug/temp/tmp/todo/fixme/dummy as a whole word."),
+}
+
+STATUS_TEXT = {PASS: "✅ Passed", FAIL: "❌ Not passed", REVIEW: "🔎 Needs validation"}
 
 
 def _run_items(ctx):
@@ -434,28 +479,44 @@ def _run_items(ctx):
 
 
 def run_checklist(ctx):
-    return _run_items(ctx) + run_subprocess_checks(dict(ctx, is_subprocess=True))
+    """Parent first, then each sub-process separately. Every row carries its `subject`."""
+    subject = f"Parent process: {ctx['process_name']}"
+    results = [dict(r, subject=subject) for r in _run_items(ctx)]
+    sub_base = dict(ctx, is_subprocess=True)
+    for cid, sub in ctx["subprocesses"].items():
+        subject = f"Sub-process: {sub['name']} (`{cid}`)"
+        if sub.get("error"):
+            results.append({"subject": subject, "section": "Structure & Naming", "item": "Sub-process definition fetched",
+                            "status": FAIL, "evidence": sub["error"]})
+            continue
+        sub_ctx = dict(sub_base, root=sub["root"], map_roots=sub["map_roots"], map_ids=sub["map_ids"],
+                       process_name=sub["name"], executions=sub["executions"],
+                       executions_note=sub["executions_note"])
+        results += [dict(r, subject=subject) for r in _run_items(sub_ctx)]
+    return results
 
 
-def _table(rows, head=("Section", "Checklist item", "Finding")):
-    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
-    for r in rows:
-        ev = r["evidence"].replace("|", "\|")
-        out.append(f"| {r['section']} | {r['item']} | {ev} |")
-    return out
+def _counts(rows):
+    return (sum(r["status"] == PASS for r in rows), sum(r["status"] == FAIL for r in rows),
+            sum(r["status"] == REVIEW for r in rows))
+
+
+def _esc(text):
+    return text.replace("|", "\\|").replace("\n", " ")
 
 
 def render_markdown(results, title):
-    by = {s: [r for r in results if r["status"] == s] for s in (PASS, FAIL, REVIEW)}
+    p, f, v = _counts(results)
     total = len(results)
-    if by[FAIL]:
-        verdict = f"> ## ❌ {len(by[FAIL])} checklist item(s) failed — reviewer decision required"
-    elif by[REVIEW]:
-        verdict = "> ## 🔎 No automated failures — manual review items remain"
+    if f:
+        verdict = f"> ## ❌ {f} checklist item(s) not passed — reviewer decision required"
+    elif v:
+        verdict = "> ## 🔎 No automated failures — items needing validation remain"
     else:
         verdict = "> ## ✅ All checklist items passed"
-    filled = round(10 * len(by[PASS]) / total) if total else 0
+    filled = round(10 * p / total) if total else 0
     bar = "🟩" * filled + "⬜" * (10 - filled)
+    subjects = list(dict.fromkeys(r["subject"] for r in results))
 
     lines = [
         "## 🧾 Pre-QA Checklist Validation",
@@ -464,35 +525,35 @@ def render_markdown(results, title):
         "",
         verdict,
         "",
-        f"{bar} **{len(by[PASS])} of {total}** items passed",
+        f"{bar} **{p} of {total}** items passed across the parent and {len(subjects) - 1} sub-process(es)",
         "",
-        "| ✅ Passed | ❌ Failed | 🔎 Needs review | Total |",
-        "|:-:|:-:|:-:|:-:|",
-        f"| {len(by[PASS])} | {len(by[FAIL])} | {len(by[REVIEW])} | {total} |",
-        "",
-        "### Results by section",
-        "",
-        "| Section | ✅ | ❌ | 🔎 | Status |",
+        "| Process | ✅ Passed | ❌ Not passed | 🔎 Needs validation | Overall |",
         "|---|:-:|:-:|:-:|:-:|",
     ]
-    for sec in dict.fromkeys(r["section"] for r in results):
-        rs = [r for r in results if r["section"] == sec]
-        p_ = sum(r["status"] == PASS for r in rs)
-        f_ = sum(r["status"] == FAIL for r in rs)
-        v_ = sum(r["status"] == REVIEW for r in rs)
-        icon = ICON[FAIL] if f_ else ICON[REVIEW] if v_ else ICON[PASS]
-        lines.append(f"| {sec} | {p_} | {f_} | {v_} | {icon} |")
+    for sub in subjects:
+        sp, sf, sv = _counts([r for r in results if r["subject"] == sub])
+        lines.append(f"| {sub} | {sp} | {sf} | {sv} | {ICON[FAIL] if sf else ICON[REVIEW] if sv else ICON[PASS]} |")
 
-    if by[FAIL]:
-        lines += ["", "### ❌ Failed — needs attention", ""] + _table(by[FAIL])
-    if by[REVIEW]:
-        lines += ["", "### 🔎 Needs reviewer judgement", ""] + _table(by[REVIEW])
-    if by[PASS]:
-        lines += ["", f"<details><summary><b>✅ Passed ({len(by[PASS])})</b></summary>", ""]
-        lines += _table(by[PASS]) + ["", "</details>"]
+    for sub in subjects:
+        rows = [r for r in results if r["subject"] == sub]
+        sp, sf, sv = _counts(rows)
+        lines += ["", "---", "", f"## {sub}", "", f"✅ {sp} passed · ❌ {sf} not passed · 🔎 {sv} need validation", "",
+                  "| Section | Checklist item | Status | Why |", "|---|---|:-:|---|"]
+        lines += [f"| {r['section']} | {r['item']} | {STATUS_TEXT[r['status']]} | {_esc(r['evidence'])} |" for r in rows]
+
+    lines += ["", "---", "", "## 📖 How each checklist item is validated", "",
+              "_Applied identically to the parent and to every sub-process. **Auto** = decided by the script from the "
+              "component XML / Boomi API; **Manual** = always left to the reviewer._", "",
+              "| Checklist item | Type | How it is validated |", "|---|:-:|---|"]
+    seen = set()
+    for r in results:
+        if r["item"] in seen:
+            continue
+        seen.add(r["item"])
+        kind, how = HOW_VALIDATED.get(r["item"], ("—", "—"))
+        lines.append(f"| {r['item']} | {kind} | {_esc(how)} |")
     lines += [
         "",
-        "---",
         "_Failed and review items do not block the run. The reviewer decides at the "
         "**Review pending deployments** prompt whether to approve the QA deployment._",
     ]
