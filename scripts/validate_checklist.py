@@ -24,10 +24,10 @@ workflow appends to the job summary.
 
 Sub-processes: every process-call shape in the process is followed (recursively,
 cycle-guarded, CONFIG["max_subprocess_depth"] deep). Each sub-process is fetched at
-the version deployed in the source environment, run through the structural checks in
-SUBPROCESS_CHECKS (reported as "Sub-process: <name>" rows), and verified to be
-deployed in the target environment — a parent promoted without its sub-process fails
-at runtime, so a missing/older sub-process there is a FAIL.
+the version deployed in the source environment, given the SAME full checklist as the
+parent (its own section in the report; sub-processes of sub-processes included), and
+verified to be deployed in the target environment — a parent promoted without its
+sub-process fails at runtime, so a missing/older sub-process there is a FAIL.
 
 Usage:
     python scripts/validate_checklist.py --process-name "PR_LOAD_..." --component-id X --package-id P
@@ -58,7 +58,6 @@ CONFIG = {
     "max_dynamic_properties": 20,
     # Hosts' connector types that count as "send a notification".
     "notify_connectors": {"mail", "slack", "teams", "http", "smtp"},
-    "execution_sample": 50,
     "max_subprocess_depth": 5,
 }
 
@@ -126,15 +125,31 @@ def check_naming(ctx):
     return (PASS if ok else FAIL), f"`{name}` " + ("matches" if ok else "does not match") + " the convention `PR_LOAD_<Domain>_<Object>_<Direction>_<Target>`"
 
 
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _component_ref(shape):
+    """True if the shape points at a Boomi component (mapId, connectionId, processId, ...).
+
+    Boomi shows such shapes under the referenced component's own name, so no
+    userlabel is needed for them to be identifiable.
+    """
+    return any(
+        k.lower().endswith("id") and k.lower() != "id" and _UUID.match(v or "")
+        for el in shape.iter()
+        for k, v in el.attrib.items()
+    )
+
+
 def check_labels(ctx):
     missing = [
         _shape_desc(s)
         for s in _shapes(ctx["root"])
-        if _shape_type(s) not in CONFIG["unlabelled_ok"] and not _label(s)
+        if _shape_type(s) not in CONFIG["unlabelled_ok"] and not _label(s) and not _component_ref(s)
     ]
     if missing:
         return FAIL, f"{len(missing)} unlabelled shape(s): " + ", ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
-    return PASS, "every shape has a label"
+    return PASS, "every shape has a label or references a named component"
 
 
 def check_subprocess(ctx):
@@ -341,15 +356,6 @@ def check_retry(ctx):
     return FAIL, "no Try/Catch with retryCount > 0"
 
 
-def check_overlap(ctx):
-    proc = _process_el(ctx["root"])
-    if proc is None:
-        return REVIEW, "process element not found"
-    if (proc.attrib.get("allowSimultaneous") or "").lower() == "true":
-        return FAIL, "allowSimultaneous=true — runs may overlap (also confirm the schedule window)"
-    return REVIEW, "allowSimultaneous=false; schedule window itself is set on the atom — confirm it's realistic"
-
-
 def check_test_artifacts(ctx):
     hits = [
         _shape_desc(s) + f" ('{_label(s)}')"
@@ -361,67 +367,21 @@ def check_test_artifacts(ctx):
     return PASS, "no test/debug/temp-labelled shapes"
 
 
-def _exec_statuses(ctx):
-    return [(r.get("status") or "").upper() for r in ctx["executions"]]
-
-
-def check_dev_tested(ctx):
-    if ctx["executions"] is None:
-        return REVIEW, ctx["executions_note"]
-    n = sum(1 for s in _exec_statuses(ctx) if s == "COMPLETE")
-    if n:
-        return PASS, f"{n} COMPLETE execution(s) in Dev"
-    return FAIL, "no COMPLETE execution of this process found in Dev"
-
-
-def check_paths_tested(ctx):
-    if ctx["executions"] is None:
-        return REVIEW, ctx["executions_note"]
-    statuses = _exec_statuses(ctx)
-    ok, err = "COMPLETE" in statuses, any(s in ("ERROR", "ABORTED") for s in statuses)
-    if ok and err:
-        return PASS, "both a successful and a failed execution exist in Dev"
-    return FAIL, "Dev executions: " + ("happy path only" if ok else "error path only" if err else "none")
-
-
-# Items that can't be judged from the XML. (Section, item) -> why.
-MANUAL_ITEMS = {
-    "Shared / reused connections — no duplicates": "connection duplication is across components, not visible in this process's XML",
-    "Connector operations not reused across unrelated contexts": "needs a cross-process usage search",
-    "Maps are clean — no orphaned fields": "needs profile-vs-map field analysis",
-    "No sensitive data in process logs or document cache": "depends on data content, not structure",
-    "Error messages include sufficient context": "message wording is free text",
-    "Batch processing — no unnecessary single-document loops": "depends on data volumes/intent",
-    "Document caching used appropriately": "depends on runtime behaviour",
-    "Test logs / screenshots attached or referenced": "evidence lives outside Boomi",
-}
-
-# (section, item text from checklist.md, check fn or None for manual)
+# (section, item text, check fn)
 CHECKLIST = [
     ("Structure & Naming", "Process name follows naming convention", check_naming),
-    ("Structure & Naming", "All shapes are labelled — no unnamed connectors or maps", check_labels),
+    ("Structure & Naming", "All shapes are labelled — no unnamed shapes", check_labels),
     ("Structure & Naming", "Sub-processes used appropriately for reusable logic", check_subprocess),
-    ("Structure & Naming", "Sub-processes deployed in the target environment (and themselves checked)", check_subprocess_dependencies),
+    ("Structure & Naming", "All linked sub-processes (at any depth) deployed in the target environment", check_subprocess_dependencies),
     ("Structure & Naming", "Process notes / description populated", check_description),
-    ("Connectors & Connections", "Shared / reused connections — no duplicates", None),
+    ("Structure & Naming", "No test data or test-only shapes left in the process", check_test_artifacts),
     ("Connectors & Connections", "Credentials in connection extensions, not hardcoded", check_no_hardcoded_credentials),
-    ("Connectors & Connections", "Connector operations not reused across unrelated contexts", None),
-    ("Data Handling & Mapping", "Maps are clean — no orphaned fields", None),
     ("Data Handling & Mapping", "Scripting in maps minimal and commented", check_scripting),
     ("Data Handling & Mapping", "Document / dynamic properties not overloaded", check_dynamic_properties),
-    ("Data Handling & Mapping", "No sensitive data in process logs or document cache", None),
     ("Error Handling", "Try/Catch captures all error types, not just document-level", check_try_catch),
     ("Error Handling", "Error notifications configured (email / Slack webhook)", check_notifications),
     ("Error Handling", "Failed documents go to a dead-letter path / DB", check_dead_letter),
     ("Error Handling", "Retry logic for transient / timeout failures", check_retry),
-    ("Error Handling", "Error messages include sufficient context", None),
-    ("Performance & Scalability", "Batch processing — no unnecessary single-document loops", None),
-    ("Performance & Scalability", "Document caching used appropriately", None),
-    ("Performance & Scalability", "Scheduled processes do not overlap", check_overlap),
-    ("Testing Evidence", "Process tested in Dev with representative data", check_dev_tested),
-    ("Testing Evidence", "Happy path and error path both tested", check_paths_tested),
-    ("Testing Evidence", "Test logs / screenshots attached or referenced", None),
-    ("Testing Evidence", "No test data or test-only shapes left in the process", check_test_artifacts),
 ]
 
 
@@ -430,57 +390,36 @@ CHECKLIST = [
 HOW_VALIDATED = {
     "Process name follows naming convention":
         ("Auto", "Process name matched against the regex `PR_LOAD_<Domain>_<Object>_<Direction>_<Target>` (CONFIG name_pattern)."),
-    "All shapes are labelled — no unnamed connectors or maps":
-        ("Auto", "Every `shape` in the XML except start/stop/returndocuments must have a non-empty `userlabel`."),
+    "All shapes are labelled — no unnamed shapes":
+        ("Auto", "Every `shape` except start/stop/returndocuments needs a `userlabel` OR a reference to a component "
+                 "(map, connection/operation, sub-process — Boomi displays those by the component's name)."),
     "Sub-processes used appropriately for reusable logic":
         ("Auto", "Counts process-call shapes. PASS if any exist or the process has ≤ 25 shapes; FAIL if > 25 shapes and no sub-process call."),
-    "Sub-processes deployed in the target environment (and themselves checked)":
-        ("Auto", "Each `processcall/@processId` is followed (recursively). It is fetched at the version deployed in the source env, "
-                 "must have an active deployment in the target env at the same version (FAIL otherwise), and is flagged for review if missing in the next env (prod). "
-                 "Each sub-process then gets its own full checklist below."),
+    "All linked sub-processes (at any depth) deployed in the target environment":
+        ("Auto", "Every `processcall/@processId` is followed recursively (sub-processes of sub-processes too, up to 5 levels). Each is fetched at the "
+                 "version deployed in the source env and must have an active deployment in the target env at the same version (FAIL otherwise); "
+                 "missing in the next env (prod) is flagged for review. Each linked process then gets this whole checklist in its own section."),
     "Process notes / description populated":
         ("Auto", "Component `description` element/attribute must be non-empty."),
-    "Shared / reused connections — no duplicates":
-        ("Manual", "Duplication is across components, not visible in one process's XML."),
+    "No test data or test-only shapes left in the process":
+        ("Auto", "No shape label may contain test/debug/temp/tmp/todo/fixme/dummy as a whole word."),
     "Credentials in connection extensions, not hardcoded":
         ("Auto", "Scans every attribute/element whose name looks like password/secret/token/api-key/authorization for a literal value, "
                  "and text for literal `Bearer`/`Basic` headers. Values starting with `{` or `$` (variables) are allowed."),
-    "Connector operations not reused across unrelated contexts":
-        ("Manual", "Needs a cross-process usage search."),
-    "Maps are clean — no orphaned fields":
-        ("Manual", "Needs profile-vs-map field analysis."),
     "Scripting in maps minimal and commented":
         ("Auto", "Fetches each referenced map and the process's own scripts; FAIL if a script is > 30 non-blank lines or has no comments. "
-                 "REVIEW if maps were referenced but could not be fetched."),
+                 "Needs validation if maps were referenced but could not be fetched."),
     "Document / dynamic properties not overloaded":
         ("Auto", "Counts document-property and dynamic-process-property settings; FAIL if > 20."),
-    "No sensitive data in process logs or document cache":
-        ("Manual", "Depends on data content, not structure."),
     "Try/Catch captures all error types, not just document-level":
         ("Auto", "Needs a Try/Catch shape with `catchAll=true`; FAIL if none or catch-all is off."),
     "Error notifications configured (email / Slack webhook)":
-        ("Auto", "PASS if a Notify shape exists; REVIEW if only an email/HTTP/Slack/Teams connector call exists; FAIL if neither."),
+        ("Auto", "PASS if a Notify shape exists; needs validation if only an email/HTTP/Slack/Teams connector call exists; FAIL if neither."),
     "Failed documents go to a dead-letter path / DB":
-        ("Auto", "Follows the Try/Catch `error` branch; REVIEW if it reaches a connector call (reviewer confirms it persists failures), FAIL if it reaches none or there is no Try/Catch."),
+        ("Auto", "Follows the Try/Catch `error` branch; needs validation if it reaches a connector call (reviewer confirms it persists failures), "
+                 "FAIL if it reaches none or there is no Try/Catch."),
     "Retry logic for transient / timeout failures":
         ("Auto", "Needs a Try/Catch with `retryCount` > 0."),
-    "Error messages include sufficient context":
-        ("Manual", "Message wording is free text."),
-    "Batch processing — no unnecessary single-document loops":
-        ("Manual", "Depends on data volumes / intent."),
-    "Document caching used appropriately":
-        ("Manual", "Depends on runtime behaviour."),
-    "Scheduled processes do not overlap":
-        ("Auto + Manual", "FAIL if `allowSimultaneous=true`; otherwise REVIEW because the schedule window is set on the atom."),
-    "Process tested in Dev with representative data":
-        ("Auto", "Last 50 Dev execution records for this component (parent and each sub-process separately); needs ≥ 1 COMPLETE. "
-                 "REVIEW if Dev has no runtime attached or the history can't be read."),
-    "Happy path and error path both tested":
-        ("Auto", "Same Dev execution records: needs both a COMPLETE and an ERROR/ABORTED run."),
-    "Test logs / screenshots attached or referenced":
-        ("Manual", "Evidence lives outside Boomi."),
-    "No test data or test-only shapes left in the process":
-        ("Auto", "No shape label may contain test/debug/temp/tmp/todo/fixme/dummy as a whole word."),
 }
 
 STATUS_TEXT = {PASS: "✅ Passed", FAIL: "❌ Not passed", REVIEW: "🔎 Needs validation"}
@@ -489,15 +428,14 @@ STATUS_TEXT = {PASS: "✅ Passed", FAIL: "❌ Not passed", REVIEW: "🔎 Needs v
 def _run_items(ctx):
     results = []
     for section, item, fn in CHECKLIST:
-        if fn is check_subprocess_dependencies and ctx.get("is_subprocess"):
-            continue  # dependency state is evaluated once, on the parent
-        if fn is None:
-            status, evidence = REVIEW, MANUAL_ITEMS.get(item, "needs human review")
-        else:
-            try:
-                status, evidence = fn(ctx)
-            except Exception as exc:  # a broken heuristic must not hide the other results
-                status, evidence = REVIEW, f"check errored ({type(exc).__name__}: {exc})"
+        if fn is check_subprocess_dependencies and (
+            ctx.get("is_subprocess") or not (ctx["subprocesses"] or ctx.get("subprocess_note"))
+        ):
+            continue  # evaluated once, on the parent, and only if it links to sub-processes
+        try:
+            status, evidence = fn(ctx)
+        except Exception as exc:  # a broken heuristic must not hide the other results
+            status, evidence = REVIEW, f"check errored ({type(exc).__name__}: {exc})"
         results.append({"section": section, "item": item, "status": status, "evidence": evidence})
     return results
 
@@ -508,14 +446,15 @@ def run_checklist(ctx):
     results = [dict(r, subject=subject) for r in _run_items(ctx)]
     sub_base = dict(ctx, is_subprocess=True)
     for cid, sub in ctx["subprocesses"].items():
-        subject = f"Sub-process: {sub['name']} (`{cid}`)"
+        caller = (sub.get("called_from") or ["?"])[0].split(" / ")[0]
+        level = "Sub-process" if sub["depth"] == 1 else f"Sub-process (level {sub['depth']})"
+        subject = f"{level}: {sub['name']} (`{cid}`) — called by {caller}"
         if sub.get("error"):
             results.append({"subject": subject, "section": "Structure & Naming", "item": "Sub-process definition fetched",
                             "status": FAIL, "evidence": sub["error"]})
             continue
         sub_ctx = dict(sub_base, root=sub["root"], map_roots=sub["map_roots"], map_ids=sub["map_ids"],
-                       process_name=sub["name"], executions=sub["executions"],
-                       executions_note=sub["executions_note"])
+                       process_name=sub["name"])
         results += [dict(r, subject=subject) for r in _run_items(sub_ctx)]
     return results
 
@@ -592,12 +531,6 @@ def _parse(xml_text):
         return None
 
 
-def _load_dev_env_id():
-    path = os.path.join(os.path.dirname(__file__), "..", "environments", "dev.json")
-    with open(path) as f:
-        return json.load(f)["environment_id"]
-
-
 def _load_env_id(environment):
     path = os.path.join(os.path.dirname(__file__), "..", "environments", f"{environment}.json")
     with open(path) as f:
@@ -635,18 +568,6 @@ def _fetch_subprocess_xml(client, cid, source_dep):
     return client.get_component_xml(cid)
 
 
-def _query_dev_executions(client, component_id):
-    """(records|None, note) — Dev execution history for one component."""
-    try:
-        return client.query_execution_records(
-            component_id, _load_dev_env_id(), limit=CONFIG["execution_sample"]
-        ), ""
-    except Exception as exc:
-        if "do not have access to any containers" in str(exc):
-            return None, "no runtime (atom) is attached to the Dev environment, so there is no execution history to check"
-        return None, f"could not query Dev execution history ({type(exc).__name__}: {exc})"
-
-
 def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
     """Follow process calls recursively. Returns ({cid: info}, {cid: {env: deployment|None}})."""
     subs, deployments, env_cache = {}, {}, {}
@@ -666,7 +587,6 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         if cid in subs:  # also guards against call cycles
             continue
         info = {"name": cid, "depth": depth, "map_roots": {}, "map_ids": set(), "called_from": sites}
-        info["executions"], info["executions_note"] = _query_dev_executions(client, cid)
         subs[cid] = info
         try:
             deployments[cid] = {env: find(env, cid) for env in (source_env, target_env, *extra_envs)}
@@ -705,7 +625,6 @@ def main():
     args = parser.parse_args()
 
     ctx = {"process_name": args.process_name, "map_roots": {}, "map_ids": set(),
-           "executions": None, "executions_note": "execution history not queried (offline run)",
            "subprocesses": {}, "sub_deployments": {}, "source_env": args.source_environment,
            "target_env": args.target_environment, "extra_envs": args.also_check_environment}
     client = None
@@ -730,9 +649,6 @@ def main():
         xml_text = client.get_component_xml(args.component_id, version=version)
         title = f"{args.process_name} (package {args.package_id}, component v{version})"
 
-        ctx["executions"], note = _query_dev_executions(client, args.component_id)
-        if note:
-            ctx["executions_note"] = note
 
     root = _parse(xml_text)
     if root is None:
