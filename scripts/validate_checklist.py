@@ -23,7 +23,7 @@ Prints `checklist-passed=`, `checklist-failed=`, `checklist-review=` and
 workflow appends to the job summary.
 
 Sub-processes: every process-call shape in the process is followed (recursively,
-cycle-guarded, CONFIG["max_subprocess_depth"] deep). Each sub-process is fetched at
+cycle-guarded, no depth limit). Each sub-process is fetched at
 the version deployed in the source environment, given the SAME full checklist as the
 parent (its own section in the report; sub-processes of sub-processes included), and
 verified to be deployed in the target environment — a parent promoted without its
@@ -58,7 +58,6 @@ CONFIG = {
     "max_dynamic_properties": 20,
     # Hosts' connector types that count as "send a notification".
     "notify_connectors": {"mail", "slack", "teams", "http", "smtp"},
-    "max_subprocess_depth": 5,
 }
 
 PASS, FAIL, REVIEW = "PASS", "FAIL", "REVIEW"
@@ -396,7 +395,7 @@ HOW_VALIDATED = {
     "Sub-processes used appropriately for reusable logic":
         ("Auto", "Counts process-call shapes. PASS if any exist or the process has ≤ 25 shapes; FAIL if > 25 shapes and no sub-process call."),
     "All linked sub-processes (at any depth) deployed in the target environment":
-        ("Auto", "Every `processcall/@processId` is followed recursively (sub-processes of sub-processes too, up to 5 levels). Each is fetched at the "
+        ("Auto", "Every `processcall/@processId` is followed recursively (sub-processes of sub-processes too, to any depth). Each is fetched at the "
                  "version deployed in the source env and must have an active deployment in the target env at the same version (FAIL otherwise); "
                  "missing in the next env (prod) is flagged for review. Each linked process then gets this whole checklist in its own section."),
     "Process notes / description populated":
@@ -603,11 +602,7 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         info["name"] = sub_root.attrib.get("name") or cid
         _collect_maps(sub_root, client, info["map_roots"], info["map_ids"])
         nested = _call_sites(sub_root, info["name"])
-        if depth < CONFIG["max_subprocess_depth"]:
-            queue.extend((c, depth + 1, sites) for c, sites in nested.items())
-        elif nested:
-            print(f"Sub-process '{info['name']}' calls further sub-processes beyond depth "
-                  f"{CONFIG['max_subprocess_depth']}; not followed.", file=sys.stderr)
+        queue.extend((c, depth + 1, sites) for c, sites in nested.items())
     return subs, deployments
 
 
