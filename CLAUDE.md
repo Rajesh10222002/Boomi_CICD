@@ -78,6 +78,7 @@ isn't filled in yet, ask rather than inventing a value:
   `BoomiClient.find_deployed_package()`), so a process deployed by hand in
   the Boomi UI can still be promoted; it hard-fails only if neither has it. That's the enforcement mechanism for "a process can only
   be promoted from an environment it's actually been deployed to."
+- `scripts/validate_checklist.py` also follows process-call shapes (`processcall/@processId`, recursive, cycle-guarded) — checks each sub-process's structure and that it is deployed in the target env at the source env's version. The `processId` attribute is assumed from Boomi's XML format, not yet confirmed on a real parent+sub-process pair.
 - `scripts/describe_current.py` — display-only (never used for a
   control-flow decision, unlike `resolve_current_package.py`): prints a
   one-line human-readable description of whatever `deployments/current.csv`

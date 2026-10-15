@@ -81,17 +81,27 @@ def main():
             )
     else:
         result = _resolve_current(args.name, args.environment)
-        if result is None:
-            from live_deployment import lookup
+        # Boomi is the source of truth for what's live: the ledger goes stale
+        # whenever someone deploys by hand in the Boomi UI. Prefer Boomi's active
+        # deployment and use the ledger only if Boomi can't be asked.
+        from live_deployment import lookup
 
-            live = lookup(args.name, args.environment)
-            if live:
-                result = live[:3]
+        live = lookup(args.name, args.environment)
+        if live:
+            if result is None:
                 print(
                     f"'{args.name}' isn't in deployments/current.csv for '{args.environment}', but Boomi "
                     f"reports package {live[0]} ({live[2] or 'no version'}) deployed there — using that.",
                     file=sys.stderr,
                 )
+            elif live[0] != result[0]:
+                print(
+                    f"deployments/current.csv says package {result[0]} ({result[2] or 'no version'}) is live in "
+                    f"'{args.environment}', but Boomi reports package {live[0]} ({live[2] or 'no version'}) — "
+                    f"the ledger is stale (a manual deploy?); using Boomi's.",
+                    file=sys.stderr,
+                )
+            result = live[:3]
         if result is None:
             raise SystemExit(
                 f"'{args.name}' has never been successfully deployed to '{args.environment}' "

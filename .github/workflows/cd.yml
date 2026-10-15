@@ -97,6 +97,8 @@ jobs:
             --process-name "${{ inputs.process_name }}" \
             --component-id "${{ steps.resolve.outputs.component-id }}" \
             --package-id "${{ steps.resolve.outputs.package-id }}" \
+            --source-environment dev \
+            --target-environment qa             --also-check-environment prod \
             --out ../checklist_report.md >> "$GITHUB_OUTPUT"
 
       - name: Upload checklist report
