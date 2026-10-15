@@ -1,0 +1,314 @@
+name: Rollback
+
+# Put a previously deployed package back as the active deployment of a process
+# in one environment. Run "Deployment History" first to see the versions and
+# copy the Package ID of the one you want.
+#
+# `prepare` validates the request against Boomi's own deployment history and
+# opens a tracking issue with the before -> after diff. `rollback` is gated by
+# the target GitHub Environment (dev / qa / production) — a reviewer approves
+# there — then redeploys the package and records it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to roll back"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      process_name:
+        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
+        required: true
+        type: string
+      package_id:
+        description: "Package ID to roll back to (copy it from the 'Deployment History' workflow's table)"
+        required: true
+        type: string
+      allow_undeployed:
+        description: "Override: allow a package built for this process that Boomi has no deployment record of in this environment"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: rollback-${{ inputs.environment }}-${{ inputs.process_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # the "rollback" job commits the deployment-ledger update
+  issues: write
+  deployments: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      package-id: ${{ steps.resolve.outputs.package-id }}
+      component-id: ${{ steps.resolve.outputs.component-id }}
+      version: ${{ steps.resolve.outputs.version }}
+      issue-number: ${{ steps.create_issue.outputs.issue-number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Fails the run here (before any gate or deploy) if the package isn't a
+      # valid, different, previously deployed package of this process.
+      - name: Validate rollback target
+        id: resolve
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          ALLOW_UNDEPLOYED: ${{ inputs.allow_undeployed }}
+        run: |
+          extra=""
+          if [ "$ALLOW_UNDEPLOYED" = "true" ]; then extra="--allow-undeployed"; fi
+          python resolve_rollback_target.py \
+            --name "$PROCESS_NAME" --environment "$ENVIRONMENT" --package-id "$PACKAGE_ID" $extra >> "$GITHUB_OUTPUT"
+
+      - name: Diff process structure (current -> rollback target)
+        id: xmldiff
+        continue-on-error: true
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+        run: |
+          python diff_component_versions.py \
+            --component-id "${{ steps.resolve.outputs.component-id }}" \
+            --from-package-id "${{ steps.resolve.outputs.current-package-id }}" \
+            --to-package-id "${{ steps.resolve.outputs.package-id }}" \
+            --out ../component_diff.txt >> "$GITHUB_OUTPUT"
+
+      - name: Upload process diff
+        if: steps.xmldiff.outputs.xml-diff-available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: process-diff
+          path: component_diff.txt
+
+      - name: Summary and tracking issue
+        id: create_issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          CURRENT: ${{ steps.resolve.outputs.current }}
+          TARGET_VERSION: ${{ steps.resolve.outputs.version }}
+          TARGET_PACKAGE: ${{ steps.resolve.outputs.package-id }}
+          TARGET_DEPLOYED: ${{ steps.resolve.outputs.target-deployed }}
+          SOURCE: ${{ steps.resolve.outputs.source }}
+          DIFF_OK: ${{ steps.xmldiff.outputs.xml-diff-available }}
+        run: |
+          if [ "$DIFF_OK" = "true" ]; then
+            diff_note="See this run's process-diff artifact (direction: current -> rollback target)."
+          else
+            diff_note="Not available for this run."
+          fi
+          override_note=""
+          if [ "$SOURCE" = "override" ]; then
+            override_note="⚠️ **Override:** Boomi has no deployment record of this package in $ENVIRONMENT; it was built for this process but never recorded as deployed here."
+          fi
+          body=$(cat <<EOF
+          ## ↩️ Roll back \`$PROCESS_NAME\` in **$ENVIRONMENT**
+
+          | | |
+          |---|---|
+          | **Now live** | $CURRENT |
+          | **Rolling back to** | ${TARGET_VERSION:-(no version label)} — package \`$TARGET_PACKAGE\` (last live here: $TARGET_DEPLOYED) |
+          | **Requested by** | @${{ github.actor }} |
+          | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          $override_note
+
+          Process diff: $diff_note
+
+          ⚠️ Linked sub-processes are **not** rolled back — only this process's package is redeployed.
+
+          **Reviewer:** approve or reject in the run's "Review deployments" prompt.
+          EOF
+          )
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"
+
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg title "Roll back $PROCESS_NAME in $ENVIRONMENT" --arg body "$body" --arg env "$ENVIRONMENT" \
+                  '{title: $title, body: $body, labels: ["rollback", $env]}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues")
+          issue_number=$(echo "$response" | jq -r '.number')
+          if [ -z "$issue_number" ] || [ "$issue_number" = "null" ]; then
+            issue_number=""
+            echo "::warning::Could not create the tracking issue: $response"
+          fi
+          echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
+
+  rollback:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # dev -> "dev", qa -> "qa", prod -> the "production" GitHub Environment
+    environment: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create deployment record
+        id: create_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENV_NAME: ${{ inputs.environment == 'prod' && 'production' || inputs.environment }}
+          DESC: Roll back ${{ inputs.process_name }} to package ${{ needs.prepare.outputs.package-id }}
+        run: |
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg ref "${{ github.sha }}" --arg env "$ENV_NAME" --arg desc "$DESC" \
+                  '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [], description: $desc}')" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments")
+          echo "deployment-id=$(echo "$response" | jq -r '.id')" >> "$GITHUB_OUTPUT"
+
+      - name: Redeploy the older package
+        id: deploy
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          python deploy_component.py \
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --env "$ENVIRONMENT" \
+            --config "../environments/$ENVIRONMENT.json"
+
+      # Confirms with Boomi (not just "the API call returned") that the
+      # rolled-back package is now the active deployment.
+      - name: Verify the rollback took effect
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          python describe_current.py --name "$PROCESS_NAME" --environment "$ENVIRONMENT" > ../after.txt
+          cat ../after.txt
+          live=$(grep '^current-package-id=' ../after.txt | cut -d= -f2)
+          if [ "$live" != "${{ needs.prepare.outputs.package-id }}" ]; then
+            echo "::error::Boomi reports package '$live' live, expected '${{ needs.prepare.outputs.package-id }}'."
+            exit 1
+          fi
+          echo "✅ Verified: Boomi reports the rolled-back package as live in $ENVIRONMENT." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record rollback in ledger
+        if: steps.deploy.outcome == 'success'
+        env:
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          python scripts/update_deployment_ledger.py \
+            --process-name "$PROCESS_NAME" \
+            --component-id "${{ needs.prepare.outputs.component-id }}" \
+            --environment "$ENVIRONMENT" \
+            --package-id "${{ needs.prepare.outputs.package-id }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --action rollback --status success \
+            --requested-by "${{ github.actor }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployments/
+          if git diff --cached --quiet; then
+            echo "No ledger changes to commit."
+          else
+            git commit -m "Record rollback: $PROCESS_NAME -> $ENVIRONMENT (${{ needs.prepare.outputs.package-id }})"
+            pushed=false
+            for attempt in 1 2 3; do
+              git fetch origin "${{ github.ref_name }}"
+              if git rebase "origin/${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                pushed=true
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$pushed" != true ]; then
+              echo "::warning::Failed to push the ledger update after 3 attempts — deployments/*.csv is out of date until reconciled manually."
+            fi
+          fi
+
+      - name: Finalize deployment status and tracking issue
+        if: always() && needs.prepare.outputs.issue-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          outcome="${{ job.status }}"
+          state="success"
+          if [ "$outcome" != "success" ]; then state="failure"; fi
+
+          if [ -n "${{ steps.create_deployment.outputs.deployment-id }}" ]; then
+            curl -s -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -d "$(jq -n --arg state "$state" '{state: $state, description: ("Run finished with status: " + $state)}')" \
+              "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses" > /dev/null
+          fi
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg body "Rollback finished with status: $outcome." '{body: $body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}/comments" > /dev/null
+          curl -s -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"state": "closed"}' \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}" > /dev/null
+
+  # Closes the tracking issue even when the reviewer rejects the gate (the
+  # gated job never starts then, so its own finalize step never runs).
+  close-issue:
+    needs: [prepare, rollback]
+    if: always() && needs.prepare.outputs.issue-number != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close the tracking issue if still open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ needs.prepare.outputs.issue-number }}
+          RESULT: ${{ needs.rollback.result }}
+        run: |
+          state=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE" | jq -r '.state')
+          [ "$state" = "open" ] || exit 0
+          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg b "The rollback ended with status: $RESULT (rejected at the gate, failed, or cancelled). Closing this issue." '{body: $b}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE/comments" > /dev/null
+          curl -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            -d '{"state": "closed"}' "https://api.github.com/repos/${{ github.repository }}/issues/$ISSUE" > /dev/null

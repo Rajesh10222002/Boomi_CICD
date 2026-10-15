@@ -79,6 +79,7 @@ isn't filled in yet, ask rather than inventing a value:
   the Boomi UI can still be promoted; it hard-fails only if neither has it. That's the enforcement mechanism for "a process can only
   be promoted from an environment it's actually been deployed to."
 - `scripts/validate_checklist.py` also follows process-call shapes (`processcall/@processId`, recursive, cycle-guarded) — checks each sub-process's structure and that it is deployed in the target env at the source env's version. The `processId` attribute is assumed from Boomi's XML format, not yet confirmed on a real parent+sub-process pair.
+- `.github/workflows/deployment-history.yml` (read-only: env + process -> every Boomi DeployedPackage record, incl. manual deploys, with CURRENT marked) and `rollback.yml` (env + process + package id from that table -> validates against Boomi's history via `scripts/resolve_rollback_target.py`, tracking issue + diff, environment gate, redeploys, verifies with Boomi, ledger row `action=rollback`). Boomi, not deployments/*.csv, is the source of truth for history. Unconfirmed against a real account: whether Boomi's DeployedPackage query keeps *inactive* (previous) records — if it only returns the active one, history shows a single row and `allow_undeployed` is the way to roll back to a built package.
 - `scripts/describe_current.py` — display-only (never used for a
   control-flow decision, unlike `resolve_current_package.py`): prints a
   one-line human-readable description of whatever `deployments/current.csv`

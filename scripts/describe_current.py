@@ -26,18 +26,8 @@ def main():
     parser.add_argument("--environment", required=True, choices=["dev", "qa", "prod"])
     args = parser.parse_args()
 
-    if os.path.exists(CURRENT_PATH):
-        with open(CURRENT_PATH, newline="") as f:
-            for row in csv.DictReader(f):
-                if row["process_name"] == args.name and row["environment"] == args.environment:
-                    version = row.get("version") or "(no version label)"
-                    print(
-                        f"current={version} — package {row['package_id']}, "
-                        f"deployed {row['deployed_at']} by {row['deployed_by']}"
-                    )
-                    print(f"current-package-id={row['package_id']}")
-                    return
-
+    # Boomi is the source of truth for what's live (the ledger goes stale after
+    # a deploy done by hand in the Boomi UI); the ledger is only the fallback.
     from live_deployment import lookup
 
     live = lookup(args.name, args.environment)
@@ -45,10 +35,22 @@ def main():
         package_id, _, version, deployed_at, deployed_by = live
         print(
             f"current={version or '(no version label)'} — package {package_id}, deployed {deployed_at}"
-            f"{' by ' + deployed_by if deployed_by else ''} (deployed outside the pipeline, per Boomi)"
+            f"{' by ' + deployed_by if deployed_by else ''}"
         )
         print(f"current-package-id={package_id}")
         return
+
+    if os.path.exists(CURRENT_PATH):
+        with open(CURRENT_PATH, newline="") as f:
+            for row in csv.DictReader(f):
+                if row["process_name"] == args.name and row["environment"] == args.environment:
+                    version = row.get("version") or "(no version label)"
+                    print(
+                        f"current={version} — package {row['package_id']}, "
+                        f"deployed {row['deployed_at']} by {row['deployed_by']} (from the ledger; Boomi could not confirm)"
+                    )
+                    print(f"current-package-id={row['package_id']}")
+                    return
 
     print("current=(nothing deployed yet)")
     print("current-package-id=")

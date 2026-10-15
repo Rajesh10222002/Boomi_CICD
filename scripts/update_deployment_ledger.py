@@ -98,7 +98,7 @@ def main():
     parser.add_argument("--environment", required=True, choices=["dev", "qa", "prod"])
     parser.add_argument("--package-id", required=True)
     parser.add_argument("--version", default="")
-    parser.add_argument("--action", required=True, choices=["ci-deploy", "promote"])
+    parser.add_argument("--action", required=True, choices=["ci-deploy", "promote", "rollback"])
     parser.add_argument("--status", required=True, choices=["success", "failure"])
     parser.add_argument("--requested-by", default="")
     parser.add_argument("--run-url", default="")

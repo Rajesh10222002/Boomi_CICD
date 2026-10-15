@@ -1,0 +1,60 @@
+name: Deployment History
+
+# Read-only. Pick an environment and a process; the job summary lists every
+# deployment Boomi has on record for it (version, package id, date, who,
+# which one is CURRENT) — including deployments done by hand in the Boomi UI.
+# Copy a Package ID from the table into the "Rollback" workflow to go back.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to look at"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      process_name:
+        description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch deployment history from Boomi
+        working-directory: scripts
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          python deployment_history.py \
+            --process-name "$PROCESS_NAME" \
+            --environment "$ENVIRONMENT" \
+            --out ../deployment_history.md
+          cat ../deployment_history.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload history report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-history
+          path: deployment_history.md
