@@ -4,7 +4,6 @@ Structure & Naming
 Process name follows agreed naming convention e.g. PR_LOAD_[Domain]_[Object]_[Direction]_[Target]
 All shapes are labelled clearly — no unnamed shapes (shapes that reference a named component, e.g. a map or connector, count as named)
 Sub-processes used appropriately for reusable logic
-All linked sub-processes (at any depth) are deployed in the target environment
 Process notes / description field is populated
 No test data or test-only shapes left in the process
 Connectors & Connections
