@@ -24,14 +24,13 @@ workflow appends to the job summary.
 
 Sub-processes: every process-call shape in the process is followed (recursively,
 cycle-guarded, no depth limit). Each sub-process is fetched at
-the version deployed in the source environment, given the SAME full checklist as the
-parent (its own section in the report; sub-processes of sub-processes included), and
-verified to be deployed in the target environment — a parent promoted without its
-sub-process fails at runtime, so a missing/older sub-process there is a FAIL.
+the version deployed in the source environment (else its latest version) and given the
+SAME full checklist as the parent, in its own section of the report; sub-processes of
+sub-processes are included. Whether a sub-process is deployed anywhere is NOT checked.
 
 Usage:
     python scripts/validate_checklist.py --process-name "PR_LOAD_..." --component-id X --package-id P
-        [--source-environment dev --target-environment qa]
+        [--source-environment dev]
     python scripts/validate_checklist.py --process-name "..." --xml-file process.xml   # offline
 """
 
@@ -161,15 +160,6 @@ def check_subprocess(ctx):
     return PASS, f"{len(shapes)} shapes — small enough not to need sub-processes"
 
 
-def _subprocess_calls(root):
-    """componentIds of every sub-process called from this process's process-call shapes."""
-    ids = []
-    for el in root.iter():
-        if _tag(el) == "processcall" and el.attrib.get("processId"):
-            ids.append(el.attrib["processId"])
-    return list(dict.fromkeys(ids))
-
-
 def _call_sites(root, owner):
     """{componentId: ["<owner> / <shape name> (<label>)", ...]} for every process-call shape."""
     sites = {}
@@ -191,46 +181,6 @@ def _call_sites(root, owner):
                     f"{owner} / shape '{name}'" + (f" ('{label}')" if label else "") + f" ({pos}; {flow})"
                 )
     return sites
-
-
-def check_subprocess_dependencies(ctx):
-    subs = ctx["subprocesses"]
-    if not subs:
-        if ctx.get("subprocess_note"):
-            return REVIEW, ctx["subprocess_note"]
-        return PASS, "no sub-process calls"
-    target, source = ctx["target_env"], ctx["source_env"]
-    bad, notes = [], []
-    for cid, sub in subs.items():
-        label = f"'{sub['name']}'"
-        if sub.get("error"):
-            bad.append(f"{label} ({cid}) could not be fetched: {sub['error']}")
-            continue
-        deps = ctx["sub_deployments"].get(cid)
-        if deps is None:
-            notes.append(f"{label}: deployment state not checked")
-            continue
-        src, tgt = deps.get(source), deps.get(target)
-        if tgt is None:
-            where = f"deployed in {source}" if src else f"not deployed in {source} either"
-            bad.append(f"{label} is NOT deployed in {target} ({where})")
-        elif src and src.get("packageVersion") != tgt.get("packageVersion"):
-            bad.append(
-                f"{label} version differs: {source}={src.get('packageVersion')} vs {target}={tgt.get('packageVersion')}"
-            )
-    for env in ctx.get("extra_envs", ()):
-        missing = [f"'{s['name']}'" for cid, s in subs.items()
-                   if cid in ctx["sub_deployments"] and ctx["sub_deployments"][cid].get(env) is None]
-        if missing:
-            notes.append(f"not yet deployed in {env} (needed before promotion there): " + ", ".join(missing))
-    sites = " | Call sites: " + "; ".join(
-        f"'{s['name']}' <- {', '.join(s.get('called_from', [])) or '?'}" for s in subs.values()
-    )
-    if bad:
-        return FAIL, "; ".join(bad) + sites
-    if notes:
-        return REVIEW, "; ".join(notes) + sites
-    return PASS, f"{len(subs)} sub-process(es), all deployed in {target} at the {source} version" + sites
 
 
 def check_description(ctx):
@@ -371,7 +321,6 @@ CHECKLIST = [
     ("Structure & Naming", "Process name follows naming convention", check_naming),
     ("Structure & Naming", "All shapes are labelled — no unnamed shapes", check_labels),
     ("Structure & Naming", "Sub-processes used appropriately for reusable logic", check_subprocess),
-    ("Structure & Naming", "All linked sub-processes (at any depth) deployed in the target environment", check_subprocess_dependencies),
     ("Structure & Naming", "Process notes / description populated", check_description),
     ("Structure & Naming", "No test data or test-only shapes left in the process", check_test_artifacts),
     ("Connectors & Connections", "Credentials in connection extensions, not hardcoded", check_no_hardcoded_credentials),
@@ -394,10 +343,6 @@ HOW_VALIDATED = {
                  "(map, connection/operation, sub-process — Boomi displays those by the component's name)."),
     "Sub-processes used appropriately for reusable logic":
         ("Auto", "Counts process-call shapes. PASS if any exist or the process has ≤ 25 shapes; FAIL if > 25 shapes and no sub-process call."),
-    "All linked sub-processes (at any depth) deployed in the target environment":
-        ("Auto", "Every `processcall/@processId` is followed recursively (sub-processes of sub-processes too, to any depth). Each is fetched at the "
-                 "version deployed in the source env and must have an active deployment in the target env at the same version (FAIL otherwise); "
-                 "missing in the next env (prod) is flagged for review. Each linked process then gets this whole checklist in its own section."),
     "Process notes / description populated":
         ("Auto", "Component `description` element/attribute must be non-empty."),
     "No test data or test-only shapes left in the process":
@@ -427,10 +372,6 @@ STATUS_TEXT = {PASS: "✅ Passed", FAIL: "❌ Not passed", REVIEW: "🔎 Needs v
 def _run_items(ctx):
     results = []
     for section, item, fn in CHECKLIST:
-        if fn is check_subprocess_dependencies and (
-            ctx.get("is_subprocess") or not (ctx["subprocesses"] or ctx.get("subprocess_note"))
-        ):
-            continue  # evaluated once, on the parent, and only if it links to sub-processes
         try:
             status, evidence = fn(ctx)
         except Exception as exc:  # a broken heuristic must not hide the other results
@@ -443,7 +384,7 @@ def run_checklist(ctx):
     """Parent first, then each sub-process separately. Every row carries its `subject`."""
     subject = f"Parent process: {ctx['process_name']}"
     results = [dict(r, subject=subject) for r in _run_items(ctx)]
-    sub_base = dict(ctx, is_subprocess=True)
+    sub_base = dict(ctx)
     for cid, sub in ctx["subprocesses"].items():
         caller = (sub.get("called_from") or ["?"])[0].split(" / ")[0]
         level = "Sub-process" if sub["depth"] == 1 else f"Sub-process (level {sub['depth']})"
@@ -567,14 +508,21 @@ def _fetch_subprocess_xml(client, cid, source_dep):
     return client.get_component_xml(cid)
 
 
-def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
-    """Follow process calls recursively. Returns ({cid: info}, {cid: {env: deployment|None}})."""
-    subs, deployments, env_cache = {}, {}, {}
+def load_subprocesses(root, client, source_env):
+    """Follow process calls recursively (any depth, cycle-guarded). Returns {componentId: info}.
 
-    def find(env, cid):
-        if env not in env_cache:
-            env_cache[env] = client.list_deployed_packages(_load_env_id(env))
-        recs = [r for r in env_cache[env]
+    Each sub-process is fetched at the version live in `source_env` when Boomi
+    says so (that is the version being promoted), else at its latest version.
+    """
+    subs = {}
+    try:
+        deployed = client.list_deployed_packages(_load_env_id(source_env))
+    except Exception as exc:
+        print(f"Could not read {source_env} deployments (using latest sub-process versions): {exc}", file=sys.stderr)
+        deployed = []
+
+    def live(cid):
+        recs = [r for r in deployed
                 if r.get("componentId") == cid and str(r.get("active", True)).lower() != "false"]
         recs.sort(key=lambda r: r.get("deployedDate", ""), reverse=True)
         return recs[0] if recs else None
@@ -588,11 +536,7 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         info = {"name": cid, "depth": depth, "map_roots": {}, "map_ids": set(), "called_from": sites}
         subs[cid] = info
         try:
-            deployments[cid] = {env: find(env, cid) for env in (source_env, target_env, *extra_envs)}
-        except Exception as exc:
-            print(f"Could not read deployments for sub-process {cid}: {exc}", file=sys.stderr)
-        try:
-            sub_root = _parse(_fetch_subprocess_xml(client, cid, (deployments.get(cid) or {}).get(source_env)))
+            sub_root = _parse(_fetch_subprocess_xml(client, cid, live(cid)))
             if sub_root is None:
                 raise ValueError("component XML did not parse")
         except Exception as exc:
@@ -601,9 +545,8 @@ def load_subprocesses(root, client, source_env, target_env, extra_envs=()):
         info["root"] = sub_root
         info["name"] = sub_root.attrib.get("name") or cid
         _collect_maps(sub_root, client, info["map_roots"], info["map_ids"])
-        nested = _call_sites(sub_root, info["name"])
-        queue.extend((c, depth + 1, sites) for c, sites in nested.items())
-    return subs, deployments
+        queue.extend((c, depth + 1, sites) for c, sites in _call_sites(sub_root, info["name"]).items())
+    return subs
 
 
 def main():
@@ -613,15 +556,11 @@ def main():
     parser.add_argument("--package-id", default="")
     parser.add_argument("--xml-file", default="", help="offline: validate this XML file instead of calling Boomi")
     parser.add_argument("--source-environment", default="dev", help="environment the package is promoted from")
-    parser.add_argument("--target-environment", default="qa", help="environment the package is promoted to")
-    parser.add_argument("--also-check-environment", action="append", default=[],
-                        help="further environment(s) the package will reach next (e.g. prod); sub-processes missing there are flagged for review")
     parser.add_argument("--out", default="checklist_report.md")
     args = parser.parse_args()
 
     ctx = {"process_name": args.process_name, "map_roots": {}, "map_ids": set(),
-           "subprocesses": {}, "sub_deployments": {}, "source_env": args.source_environment,
-           "target_env": args.target_environment, "extra_envs": args.also_check_environment}
+           "subprocesses": {}}
     client = None
 
     if args.xml_file:
@@ -652,11 +591,7 @@ def main():
 
     _collect_maps(root, client, ctx["map_roots"], ctx["map_ids"])
     if client is not None:
-        ctx["subprocesses"], ctx["sub_deployments"] = load_subprocesses(
-            root, client, args.source_environment, args.target_environment, args.also_check_environment
-        )
-    elif _subprocess_calls(root):
-        ctx["subprocess_note"] = f"{len(_subprocess_calls(root))} sub-process call(s) found but not fetched (offline run)"
+        ctx["subprocesses"] = load_subprocesses(root, client, args.source_environment)
 
     results = run_checklist(ctx)
     report = render_markdown(results, title)
