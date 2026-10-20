@@ -329,6 +329,16 @@ class BoomiClient:
         resp = self._request("GET", self._url("EnvironmentExtensions", environment_id))
         return resp.json()
 
+    def update_environment_extensions(self, environment_id, payload):
+        """
+        Partial update of an environment's extensions: `payload` carries only the
+        connections/fields to change (with "partial": true). UNVERIFIED against a
+        real account — apply_extensions.py re-reads and verifies afterwards, and has
+        a dry-run mode, so the first real use is observable.
+        """
+        resp = self._request("POST", self._url("EnvironmentExtensions", environment_id), json=payload)
+        return resp.json()
+
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):
         """Poll an execution until it leaves an in-progress state or timeout_s elapses."""
         deadline = time.time() + timeout_s

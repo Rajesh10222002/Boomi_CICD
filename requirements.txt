@@ -1,2 +1,4 @@
 requests>=2.31
 urllib3>=1.26
+oracledb>=2.0
+cryptography>=42.0

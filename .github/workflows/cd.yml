@@ -7,6 +7,14 @@ on:
         description: "Process name (as shown in Boomi / by 'List Boomi Processes')"
         required: true
         type: string
+      extensions_mode:
+        description: "Environment extensions (only when the repo variable EXT_SYNC=true): dry-run shows what would be set; apply sets them"
+        required: false
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - apply
 
 concurrency:
   # Keep each process's full QA -> production chain serialized.
@@ -200,8 +208,37 @@ jobs:
             echo "_Approve or reject the QA deployment with **Review deployments** at the top of this page._"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  deploy:
+  # ---- Environment extensions (optional; on only when repo variable EXT_SYNC == 'true') ----
+  # Runs on the runner(s) in repo variable EXT_RUNNER_LABELS (e.g. a self-hosted runner that can
+  # reach the extension value store). Plan = before approval: reads store METADATA only and the
+  # field list from Dev; stops the run for PD when a secret is missing.
+  extension-plan-qa:
     needs: prepare
+    if: ${{ vars.EXT_SYNC == 'true' }}
+    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Plan QA extensions
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
+          EXT_PLAN_DB_USER: ${{ secrets.EXT_PLAN_DB_USER }}
+          EXT_PLAN_DB_PASSWORD: ${{ secrets.EXT_PLAN_DB_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: qa
+          EXT_MODE: plan
+        run: python scripts/apply_extensions.py
+
+  deploy:
+    needs: [prepare, extension-plan-qa]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.extension-plan-qa.result == 'success' || needs.extension-plan-qa.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: qa
     steps:
@@ -317,9 +354,36 @@ jobs:
             -d '{"state": "closed"}' \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"
 
-  prepare-production:
+  # After the QA deploy: set QA's connection extensions from the store (dry-run unless
+  # extensions_mode=apply). Production only proceeds if this succeeds (or is switched off).
+  apply-extensions-qa:
     needs: [prepare, deploy]
-    if: github.event_name == 'workflow_dispatch' && needs.deploy.result == 'success'
+    if: ${{ vars.EXT_SYNC == 'true' && needs.deploy.result == 'success' }}
+    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Apply QA extensions
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
+          EXT_DB_USER: ${{ secrets.EXT_QA_DB_USER }}
+          EXT_DB_PASSWORD: ${{ secrets.EXT_QA_DB_PASSWORD }}
+          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: qa
+          EXT_MODE: ${{ inputs.extensions_mode == 'apply' && 'apply' || 'dry-run' }}
+        run: python scripts/apply_extensions.py
+
+  prepare-production:
+    needs: [prepare, deploy, apply-extensions-qa]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.deploy.result == 'success' && (needs.apply-extensions-qa.result == 'success' || needs.apply-extensions-qa.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       issue-number: ${{ steps.create_issue.outputs.issue-number }}
@@ -383,9 +447,35 @@ jobs:
           _Approve or reject with **Review deployments** if reviewers are configured on the production environment._
           EOF
 
-  deploy-production:
+  # Before the Production approval gate: plan PD's extensions. A missing secret for PD STOPS the
+  # run here (deploy-production is then skipped) — QA stays deployed.
+  extension-plan-pd:
     needs: [prepare, prepare-production]
-    if: github.event_name == 'workflow_dispatch' && needs.prepare-production.result == 'success'
+    if: ${{ vars.EXT_SYNC == 'true' && needs.prepare-production.result == 'success' }}
+    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Plan PD extensions
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
+          EXT_PLAN_DB_USER: ${{ secrets.EXT_PLAN_DB_USER }}
+          EXT_PLAN_DB_PASSWORD: ${{ secrets.EXT_PLAN_DB_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.prepare-production.outputs.issue-number }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: prod
+          EXT_MODE: plan
+        run: python scripts/apply_extensions.py
+
+  deploy-production:
+    needs: [prepare, prepare-production, extension-plan-pd]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.prepare-production.result == 'success' && (needs.extension-plan-pd.result == 'success' || needs.extension-plan-pd.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -499,6 +589,32 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}"
+
+  # After the Production deploy: set PD's connection extensions from the store.
+  apply-extensions-pd:
+    needs: [prepare, prepare-production, deploy-production]
+    if: ${{ vars.EXT_SYNC == 'true' && needs.deploy-production.result == 'success' }}
+    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Apply PD extensions
+        env:
+          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
+          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
+          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
+          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
+          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
+          EXT_DB_USER: ${{ secrets.EXT_PD_DB_USER }}
+          EXT_DB_PASSWORD: ${{ secrets.EXT_PD_DB_PASSWORD }}
+          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.prepare-production.outputs.issue-number }}
+          PROCESS_NAME: ${{ inputs.process_name }}
+          ENVIRONMENT: prod
+          EXT_MODE: ${{ inputs.extensions_mode == 'apply' && 'apply' || 'dry-run' }}
+        run: python scripts/apply_extensions.py
 
   # Safety net: closes any tracking issue still open once the run is over —
   # including when a reviewer rejects a gate (the gated job never starts, so
