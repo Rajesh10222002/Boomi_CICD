@@ -316,6 +316,19 @@ class BoomiClient:
         resp = self._request("GET", self._url("Component", path), headers={"Accept": "application/xml"})
         return resp.text
 
+    def get_environment_extensions(self, environment_id):
+        """
+        The full Environment Extensions object for an environment (connection,
+        operation and process-property extension values etc.), as JSON.
+
+        UNVERIFIED against a real account: the shape (connections -> connection
+        -> field[] with id/label/value/useDefault/usesEncryption) follows
+        Boomi's documented EnvironmentExtensions object. Callers must not print
+        field values — encrypted fields come back without their value anyway.
+        """
+        resp = self._request("GET", self._url("EnvironmentExtensions", environment_id))
+        return resp.json()
+
     def wait_for_execution(self, execution_id, timeout_s=180, poll_s=5):
         """Poll an execution until it leaves an in-progress state or timeout_s elapses."""
         deadline = time.time() + timeout_s
