@@ -620,7 +620,7 @@ jobs:
   # including when a reviewer rejects a gate (the gated job never starts, so
   # its own "finalize" step never runs) or the run is cancelled.
   close-issues:
-    needs: [prepare, deploy, prepare-production, deploy-production]
+    needs: [prepare, deploy, apply-extensions-qa, prepare-production, deploy-production, apply-extensions-pd]
     if: always() && needs.prepare.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
