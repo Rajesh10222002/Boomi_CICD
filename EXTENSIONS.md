@@ -45,3 +45,7 @@ The Boomi `EnvironmentExtensions` shape (connections → connection → field[])
 call follow Boomi's documented object but are unverified here. The first runs are therefore
 `dry-run`; `apply` re-reads Boomi and fails the job if a changed field isn't actually updated.
 Use the **Extension Probe** workflow (read-only) to see the real field ids.
+
+## All extension types (enhanced version)
+
+Store rows now carry `extension_type` (CONNECTION, DYNAMIC_PROPERTY, PROCESS_PROPERTY, CROSS_REFERENCE) plus `sub_key`, `row_no`, `use_default`, `process_name`, `connector_type`. Run `scripts/sql/oracle_extension_store_v2.sql` as CICD_OWNER once (idempotent). Connections match by component id, or by name when the stored id is a placeholder. Seed values with `scripts/seed_extension_values.py --type ... --name ...` (see its docstring). The dynamic-property, process-property and cross-reference handlers follow Boomi's documented shapes and are not yet verified on a real account.
