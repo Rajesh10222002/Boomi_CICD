@@ -102,7 +102,7 @@ def field_summary(field):
     return {
         "id": field.get("id") or field.get("label") or "?",
         "use_default": field.get("useDefault"),
-        "encrypted": bool(field.get("usesEncryption") or field.get("encryptedValueSet") or field.get("type") == "password"),
+        "encrypted": str(field.get("usesEncryption")).lower() == "true" or field.get("type") == "password",
         "value_set": bool(field.get("value")) or bool(field.get("encryptedValueSet")),
     }
 

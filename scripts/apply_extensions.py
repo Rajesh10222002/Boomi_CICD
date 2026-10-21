@@ -42,8 +42,14 @@ from extension_probe import _as_list, _sections, collect_dependencies, environme
 from extension_store import StoreError, open_store, rows_for_connection
 
 
+def _truthy(value):
+    return value is True or str(value).lower() == "true"
+
+
 def _is_encrypted(field):
-    return bool(field.get("usesEncryption") or field.get("encryptedValueSet") or field.get("type") == "password")
+    """Only fields Boomi itself marks as encrypted (password-type). NOT `encryptedValueSet`, which is
+    just "a value is stored" and was wrongly turned on for plain fields by an earlier version."""
+    return _truthy(field.get("usesEncryption")) or field.get("type") == "password"
 
 
 def _field_id(field):
@@ -105,8 +111,10 @@ def build_update(extensions, results):
                 nf = copy.deepcopy(f)
                 nf["value"] = changes[item["id"]][fid]["value"]
                 nf["useDefault"] = False
-                if "encryptedValueSet" in nf or _is_encrypted(nf):
+                if _is_encrypted(nf):
                     nf["encryptedValueSet"] = True
+                elif "encryptedValueSet" in nf:
+                    nf["encryptedValueSet"] = False  # plain fields must stay plain (also repairs an earlier wrong update)
                 new_item["field"].append(nf)
         out_items.append(new_item)
     new_conns = {k: v for k, v in conns.items() if k != "connection"}
