@@ -74,12 +74,24 @@ def _names(items):
     return ", ".join(f"`{i}`" for i in items) or "—"
 
 
-def render(process_name, environment, mode, results_by_type, policy, stopped):
+def store_line(rows, process_name):
+    """One line saying what the store returned, so an empty section can be explained."""
+    by_type = {}
+    for r in rows:
+        by_type[r["extension_type"]] = by_type.get(r["extension_type"], 0) + 1
+    mine = sum(1 for h in HANDLERS for r in rows_for(h, rows, process_name))
+    kinds = ", ".join(f"{t}: {n}" for t, n in sorted(by_type.items())) or "none"
+    return f"Store rows read: **{len(rows)}** ({kinds}); applying to this process: **{mine}**"
+
+
+def render(process_name, environment, mode, results_by_type, policy, stopped, store_info=""):
     icon = {"plan": "🗺️", "dry-run": "🧪", "apply": "🔐"}[mode]
     lines = [f"## {icon} Extensions — `{process_name}` → **{environment}** ({mode})", ""]
     if mode == "plan":
         lines += ["_Plan only: field list read from Dev, store read as metadata. Nothing is changed and no value is read._", ""]
     lines += [f"Missing-secret policy for {environment}: **{policy}**", ""]
+    if store_info:
+        lines += [store_info, ""]
 
     conns = results_by_type["CONNECTION"]
     lines += ["### Connections", "", "| Connection | Matched by | Will set from store | Missing secrets | Store fields not in Boomi | Note |",
@@ -169,7 +181,8 @@ def main():
             sys.exit(2)
         problems = verify_all(client, environment_id(args.environment), results)
 
-    report = render(args.process_name, args.environment, args.mode, results, policy, stopped)
+    report = render(args.process_name, args.environment, args.mode, results, policy, stopped,
+                    store_line(rows, args.process_name))
     if args.mode == "apply" and not stopped:
         report += (f"\n✅ Applied {to_set} item(s) and verified in Boomi.\n" if not problems and to_set
                    else (f"\n❌ Verification problems: {'; '.join(problems)}\n" if problems else "\nNothing to apply.\n"))
