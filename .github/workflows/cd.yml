@@ -17,19 +17,18 @@ on:
           - apply
 
 concurrency:
-  # Keep each process's full QA -> production chain serialized.
+  # Keep each process's Dev -> production promotion serialized.
   group: cd-${{ inputs.process_name }}
   cancel-in-progress: false
 
 permissions:
-  contents: write # the "deploy" job commits the deployment-ledger update
+  contents: write # the deploy job commits the deployment-ledger update
   issues: write
   deployments: write
 
 jobs:
-  # Resolves the package and opens the QA tracking issue before the QA
-  # Environment gate. The production issue is opened after QA succeeds and
-  # before the production gate.
+  # Dev -> Production (no QA stage). Resolves the package currently deployed in Dev, runs the
+  # checklist and diff, and opens the tracking issue BEFORE the production environment gate.
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -48,7 +47,8 @@ jobs:
         run: pip install -r requirements.txt
 
       # Resolve the package currently deployed in Dev from this repo's
-      # ledger; do not fall back to Boomi's global latest-package lookup.
+      # ledger (falls back to Boomi's active Dev deployment); never Boomi's
+      # global latest-package lookup.
       - name: Resolve current Dev package
         id: resolve
         working-directory: scripts
@@ -59,8 +59,8 @@ jobs:
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
         run: python resolve_current_package.py --name "${{ inputs.process_name }}" --environment dev >> "$GITHUB_OUTPUT"
 
-      # Best-effort, display-only lookup of what's currently in QA.
-      - name: Describe current target-environment state
+      # Best-effort, display-only lookup of what's currently in production.
+      - name: Describe current production state
         id: current
         working-directory: scripts
         env:
@@ -68,19 +68,19 @@ jobs:
           BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
           BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
           BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: python describe_current.py --name "${{ inputs.process_name }}" --environment qa >> "$GITHUB_OUTPUT"
+        run: python describe_current.py --name "${{ inputs.process_name }}" --environment prod >> "$GITHUB_OUTPUT"
 
       - name: Summary - promotion request
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          # 🚀 Promote `${{ inputs.process_name }}` to QA
+          # 🚀 Promote `${{ inputs.process_name }}` from Dev to Production
 
           | | |
           |---|---|
           | **Process** | ${{ inputs.process_name }} |
           | **Version to deploy** | ${{ steps.resolve.outputs.version }} |
           | **Package** | `${{ steps.resolve.outputs.package-id }}` |
-          | **Currently in QA** | ${{ steps.current.outputs.current }} |
+          | **Currently in Production** | ${{ steps.current.outputs.current }} |
           | **Requested by** | @${{ github.actor }} |
           | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
 
@@ -90,7 +90,7 @@ jobs:
 
       # Checklist validation (checklist.md) against the package's component
       # XML. Never fails the run: results (pass / fail / needs-review) go in
-      # the job summary and tracking issue so the QA reviewer decides.
+      # the job summary and tracking issue so the reviewer decides.
       - name: Validate checklist
         id: checklist
         continue-on-error: true
@@ -126,10 +126,8 @@ jobs:
           fi
 
       # Structural diff (elements/attributes changed, in plain terms, not
-      # raw XML) on top of the version/package-id diff above — see
-      # diff_component_versions.py. Non-fatal: degrades to
-      # xml-diff-available=false rather than blocking the promotion if it
-      # can't produce one for some reason.
+      # raw XML). Non-fatal: degrades to xml-diff-available=false rather
+      # than blocking the promotion.
       - name: Diff process structure
         id: xmldiff
         continue-on-error: true
@@ -158,7 +156,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          diff_line="qa: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
+          diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ steps.resolve.outputs.version }} (package ${{ steps.resolve.outputs.package-id }})"
           if [ "${{ steps.xmldiff.outputs.xml-diff-available }}" = "true" ]; then
             xml_diff_note="See this run's job summary and the process-diff artifact."
           else
@@ -169,12 +167,13 @@ jobs:
           else
             checklist_md="Checklist validation did not run (see the run logs) — review manually."
           fi
-          issue_title="Promote ${{ inputs.process_name }} to qa"
+          issue_title="Promote ${{ inputs.process_name }} to production"
           issue_body=$(cat <<EOF
           Process: ${{ inputs.process_name }}
           Package: ${{ steps.resolve.outputs.package-id }}
           Version: ${{ steps.resolve.outputs.version }}
-          Target: qa
+          Source: dev
+          Target: prod
           Deployment: $diff_line
           Process diff: $xml_diff_note
 
@@ -183,13 +182,13 @@ jobs:
 
           $checklist_md
 
-          **Reviewer:** check the failed / needs-review items above, then approve or reject the QA deployment in the run's "Review deployments" prompt.
+          **Reviewer:** check the failed / needs-review items above, then approve or reject the production deployment in the run's "Review deployments" prompt.
           EOF
           )
           response=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "qa"]}')" \
+            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "prod"]}')" \
             "https://api.github.com/repos/${{ github.repository }}/issues")
           issue_number=$(echo "$response" | jq -r '.number')
 
@@ -205,253 +204,16 @@ jobs:
             echo ""
             echo "📌 **Tracking issue:** #$issue_number — closes automatically when this run finishes."
             echo ""
-            echo "_Approve or reject the QA deployment with **Review deployments** at the top of this page._"
+            echo "_Approve or reject the production deployment with **Review deployments** at the top of this page._"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---- Environment extensions (optional; on only when repo variable EXT_SYNC == 'true') ----
   # Runs on the runner(s) in repo variable EXT_RUNNER_LABELS (e.g. a self-hosted runner that can
   # reach the extension value store). Plan = before approval: reads store METADATA only and the
-  # field list from Dev; stops the run for PD when a secret is missing.
-  extension-plan-qa:
+  # field list from Dev; STOPS the run when a secret is missing for PD.
+  extension-plan-pd:
     needs: prepare
     if: ${{ vars.EXT_SYNC == 'true' }}
-    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Plan QA extensions
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
-          EXT_PLAN_DB_USER: ${{ secrets.EXT_PLAN_DB_USER }}
-          EXT_PLAN_DB_PASSWORD: ${{ secrets.EXT_PLAN_DB_PASSWORD }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
-          PROCESS_NAME: ${{ inputs.process_name }}
-          ENVIRONMENT: qa
-          EXT_MODE: plan
-        run: python scripts/apply_extensions.py
-
-  deploy:
-    needs: [prepare, extension-plan-qa]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.extension-plan-qa.result == 'success' || needs.extension-plan-qa.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    environment: qa
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Create deployment record
-        id: create_deployment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          env_name="qa"
-          response=$(curl -s -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg ref "${{ github.sha }}" --arg env "$env_name" \
-                  --arg desc "Promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
-                  '{ref: $ref, environment: $env, auto_merge: false, required_contexts: [], description: $desc}')" \
-            "https://api.github.com/repos/${{ github.repository }}/deployments")
-          deployment_id=$(echo "$response" | jq -r '.id')
-          echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy package to QA
-        id: deploy
-        working-directory: scripts
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: |
-          python deploy_component.py \
-            --package-id "${{ needs.prepare.outputs.package-id }}" \
-            --env qa \
-            --config "../environments/qa.json"
-
-      # Records this promotion into deployments/{ledger,current}.csv and
-      # pushes it back to the repo with the run's own GITHUB_TOKEN — GitHub
-      # doesn't re-trigger push-triggered workflows for GITHUB_TOKEN
-      # commits, so this can't loop (not that cd.yml is push-triggered
-      # anyway). See deployments/README.md.
-      - name: Record deployment in ledger
-        if: steps.deploy.outcome == 'success'
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: |
-          env_name="qa"
-          python scripts/update_deployment_ledger.py \
-            --process-name "${{ inputs.process_name }}" \
-            --component-id "${{ needs.prepare.outputs.component-id }}" \
-            --environment "$env_name" \
-            --package-id "${{ needs.prepare.outputs.package-id }}" \
-            --version "${{ needs.prepare.outputs.version }}" \
-            --action promote --status success \
-            --requested-by "${{ github.actor }}" \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deployments/
-          if git diff --cached --quiet; then
-            echo "No ledger changes to commit."
-          else
-            git commit -m "Record promotion: ${{ inputs.process_name }} -> $env_name (${{ needs.prepare.outputs.package-id }})"
-            pushed=false
-            for attempt in 1 2 3; do
-              git fetch origin "${{ github.ref_name }}"
-              if git rebase "origin/${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
-                pushed=true
-                break
-              fi
-              sleep $((attempt * 3))
-            done
-            if [ "$pushed" != true ]; then
-              echo "::warning::Failed to push deployment-ledger update after 3 attempts — deployments/*.csv is now out of date until this is reconciled manually."
-            fi
-          fi
-
-      - name: Finalize deployment status and tracking issue
-        if: always() && needs.prepare.outputs.issue-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          outcome="${{ job.status }}"
-          state="success"
-          if [ "$outcome" != "success" ]; then state="failure"; fi
-
-          if [ -n "${{ steps.create_deployment.outputs.deployment-id }}" ]; then
-            curl -s -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -d "$(jq -n --arg state "$state" '{state: $state, description: ("Run finished with status: " + $state)}')" \
-              "https://api.github.com/repos/${{ github.repository }}/deployments/${{ steps.create_deployment.outputs.deployment-id }}/statuses"
-          fi
-
-          curl -s -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}/comments"
-          curl -s -X PATCH \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d '{"state": "closed"}' \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"
-
-  # After the QA deploy: set QA's connection extensions from the store (dry-run unless
-  # extensions_mode=apply). Production only proceeds if this succeeds (or is switched off).
-  apply-extensions-qa:
-    needs: [prepare, deploy]
-    if: ${{ vars.EXT_SYNC == 'true' && needs.deploy.result == 'success' }}
-    runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Apply QA extensions
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-          EXT_DB_DSN: ${{ secrets.EXT_DB_DSN }}
-          EXT_DB_USER: ${{ secrets.EXT_QA_DB_USER }}
-          EXT_DB_PASSWORD: ${{ secrets.EXT_QA_DB_PASSWORD }}
-          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
-          PROCESS_NAME: ${{ inputs.process_name }}
-          ENVIRONMENT: qa
-          EXT_MODE: ${{ inputs.extensions_mode == 'apply' && 'apply' || 'dry-run' }}
-        run: python scripts/apply_extensions.py
-
-  prepare-production:
-    needs: [prepare, deploy, apply-extensions-qa]
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.deploy.result == 'success' && (needs.apply-extensions-qa.result == 'success' || needs.apply-extensions-qa.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    outputs:
-      issue-number: ${{ steps.create_issue.outputs.issue-number }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Describe current production state
-        id: current
-        working-directory: scripts
-        env:
-          BOOMI_ACCOUNT_ID: ${{ secrets.BOOMI_ACCOUNT_ID }}
-          BOOMI_USERNAME: ${{ secrets.BOOMI_USERNAME }}
-          BOOMI_API_TOKEN: ${{ secrets.BOOMI_API_TOKEN }}
-          BOOMI_BASE_URL: ${{ secrets.BOOMI_BASE_URL }}
-        run: python describe_current.py --name "${{ inputs.process_name }}" --environment prod >> "$GITHUB_OUTPUT"
-
-      - name: Create production tracking issue
-        id: create_issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          diff_line="prod: ${{ steps.current.outputs.current }} -> ${{ needs.prepare.outputs.version }} (package ${{ needs.prepare.outputs.package-id }})"
-          issue_title="Auto-promote ${{ inputs.process_name }} to production"
-          issue_body=$(cat <<EOF
-          Automatic production promotion after successful QA deployment.
-
-          Process: ${{ inputs.process_name }}
-          Package: ${{ needs.prepare.outputs.package-id }}
-          Version: ${{ needs.prepare.outputs.version }}
-          Deployment: $diff_line
-
-          Requested by: ${{ github.actor }}
-          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EOF
-          )
-          response=$(curl -s -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg title "$issue_title" --arg body "$issue_body" '{title: $title, body: $body, labels: ["promote", "prod"]}')" \
-            "https://api.github.com/repos/${{ github.repository }}/issues")
-          issue_number=$(echo "$response" | jq -r '.number')
-
-          if [ -z "$issue_number" ] || [ "$issue_number" = "null" ]; then
-            issue_number=""
-            echo "::warning::Could not create the production tracking issue: $response"
-          fi
-          echo "issue-number=$issue_number" >> "$GITHUB_OUTPUT"
-
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          # 🚀 Promote \`${{ inputs.process_name }}\` to Production
-
-          | | |
-          |---|---|
-          | **Version** | ${{ needs.prepare.outputs.version }} |
-          | **Package** | \`${{ needs.prepare.outputs.package-id }}\` |
-          | **Currently in Production** | ${{ steps.current.outputs.current }} |
-          | **Source** | QA deployment succeeded in this run |
-
-          📌 **Tracking issue:** #$issue_number — closes automatically when this run finishes.
-
-          _Approve or reject with **Review deployments** if reviewers are configured on the production environment._
-          EOF
-
-  # Before the Production approval gate: plan PD's extensions. A missing secret for PD STOPS the
-  # run here (deploy-production is then skipped) — QA stays deployed.
-  extension-plan-pd:
-    needs: [prepare, prepare-production]
-    if: ${{ vars.EXT_SYNC == 'true' && needs.prepare-production.result == 'success' }}
     runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -467,15 +229,15 @@ jobs:
           EXT_PLAN_DB_USER: ${{ secrets.EXT_PLAN_DB_USER }}
           EXT_PLAN_DB_PASSWORD: ${{ secrets.EXT_PLAN_DB_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.prepare-production.outputs.issue-number }}
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
           PROCESS_NAME: ${{ inputs.process_name }}
           ENVIRONMENT: prod
           EXT_MODE: plan
         run: python scripts/apply_extensions.py
 
   deploy-production:
-    needs: [prepare, prepare-production, extension-plan-pd]
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.prepare-production.result == 'success' && (needs.extension-plan-pd.result == 'success' || needs.extension-plan-pd.result == 'skipped') }}
+    needs: [prepare, extension-plan-pd]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' && (needs.extension-plan-pd.result == 'success' || needs.extension-plan-pd.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -503,13 +265,13 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg ref "${{ github.sha }}" \
-                  --arg desc "Automatic promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
+                  --arg desc "Promote ${{ inputs.process_name }} (package ${{ needs.prepare.outputs.package-id }})" \
                   '{ref: $ref, environment: "production", auto_merge: false, required_contexts: [], description: $desc}')" \
             "https://api.github.com/repos/${{ github.repository }}/deployments")
           deployment_id=$(echo "$response" | jq -r '.id')
           echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy the same package from QA to production
+      - name: Deploy the Dev package to production
         id: deploy
         working-directory: scripts
         env:
@@ -547,7 +309,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No ledger changes to commit."
           else
-            git commit -m "Record automatic production promotion: ${{ inputs.process_name }} (${{ needs.prepare.outputs.package-id }})"
+            git commit -m "Record production promotion: ${{ inputs.process_name }} (${{ needs.prepare.outputs.package-id }})"
             pushed=false
             for attempt in 1 2 3; do
               git fetch origin "${{ github.ref_name }}"
@@ -563,7 +325,7 @@ jobs:
           fi
 
       - name: Finalize production deployment and tracking issue
-        if: always() && needs.prepare-production.outputs.issue-number != ''
+        if: always() && needs.prepare.outputs.issue-number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -583,16 +345,17 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$(jq -n --arg body "Run finished with status: $outcome." '{body: $body}')" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}/comments"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}/comments"
           curl -s -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d '{"state": "closed"}' \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare-production.outputs.issue-number }}"
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ needs.prepare.outputs.issue-number }}"
 
-  # After the Production deploy: set PD's connection extensions from the store.
+  # After the production deploy: set PD's connection extensions from the store
+  # (dry-run unless extensions_mode=apply).
   apply-extensions-pd:
-    needs: [prepare, prepare-production, deploy-production]
+    needs: [prepare, deploy-production]
     if: ${{ vars.EXT_SYNC == 'true' && needs.deploy-production.result == 'success' }}
     runs-on: ${{ fromJSON(vars.EXT_RUNNER_LABELS || '["self-hosted"]') }}
     steps:
@@ -610,26 +373,24 @@ jobs:
           EXT_DB_PASSWORD: ${{ secrets.EXT_PD_DB_PASSWORD }}
           SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.prepare-production.outputs.issue-number }}
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue-number }}
           PROCESS_NAME: ${{ inputs.process_name }}
           ENVIRONMENT: prod
           EXT_MODE: ${{ inputs.extensions_mode == 'apply' && 'apply' || 'dry-run' }}
         run: python scripts/apply_extensions.py
 
   # Safety net: closes any tracking issue still open once the run is over —
-  # including when a reviewer rejects a gate (the gated job never starts, so
+  # including when a reviewer rejects the gate (the gated job never starts, so
   # its own "finalize" step never runs) or the run is cancelled.
   close-issues:
-    needs: [prepare, deploy, apply-extensions-qa, prepare-production, deploy-production, apply-extensions-pd]
+    needs: [prepare, deploy-production, apply-extensions-pd]
     if: always() && needs.prepare.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
       - name: Close any open tracking issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QA_ISSUE: ${{ needs.prepare.outputs.issue-number }}
-          PROD_ISSUE: ${{ needs.prepare-production.outputs.issue-number }}
-          QA_RESULT: ${{ needs.deploy.result }}
+          PROD_ISSUE: ${{ needs.prepare.outputs.issue-number }}
           PROD_RESULT: ${{ needs.deploy-production.result }}
         run: |
           describe() {
@@ -644,10 +405,9 @@ jobs:
           close_if_open() {
             number="$1"; label="$2"; result="$3"
             [ -z "$number" ] && return 0
-            state=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${{ github.repository }}/issues/$number" | jq -r '.state')
+            state=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/issues/$number" | jq -r '.state')
             [ "$state" = "open" ] || return 0
-            curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               -d "$(jq -n --arg b "The $label deployment $(describe "$result"). Closing this tracking issue automatically." '{body: $b}')"               "https://api.github.com/repos/${{ github.repository }}/issues/$number/comments" > /dev/null
-            curl -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json"               -d '{"state": "closed"}'               "https://api.github.com/repos/${{ github.repository }}/issues/$number" > /dev/null
+            curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d "$(jq -n --arg b "The $label deployment $(describe "$result"). Closing this tracking issue automatically." '{body: $b}')" "https://api.github.com/repos/${{ github.repository }}/issues/$number/comments" > /dev/null
+            curl -s -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -d '{"state": "closed"}' "https://api.github.com/repos/${{ github.repository }}/issues/$number" > /dev/null
           }
-          close_if_open "$QA_ISSUE" "QA" "$QA_RESULT"
           close_if_open "$PROD_ISSUE" "production" "$PROD_RESULT"
